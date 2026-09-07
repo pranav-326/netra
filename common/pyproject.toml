@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "netra-common"
+version = "0.1.0"
+description = "Shared models, database adapters, and configuration for Netra Threat Intelligence Pipeline"
+authors = [{ name = "Netra Security Architecture Team" }]
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic>=2.7.0",
+    "pydantic-settings>=2.2.0",
+    "sqlalchemy[asyncio]>=2.0.30",
+    "asyncpg>=0.29.0",
+    "redis>=5.0.4",
+    "minio>=7.2.7",
+    "neo4j>=5.20.0",
+    "opensearch-py>=2.6.0",
+    "structlog>=24.1.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]

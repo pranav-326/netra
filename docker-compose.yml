@@ -1,0 +1,436 @@
+services:
+  # ----------------------------------------------------------------------------
+  # PostgreSQL: Structured Metadata, IOC Registry, User Data & Audit Trails
+  # ----------------------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    container_name: netra-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-netra_db}
+      POSTGRES_USER: ${POSTGRES_USER:-netra_admin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-netra_secure_password_2026}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/init-postgres.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    networks:
+      - netra-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-netra_admin} -d ${POSTGRES_DB:-netra_db}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ----------------------------------------------------------------------------
+  # Redis: In-memory Caching, Celery/Task Broker & Event Pub/Sub
+  # ----------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: netra-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - netra-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # ----------------------------------------------------------------------------
+  # OpenSearch: Forensic Logs, Email Body Indexing & Fast Search
+  # ----------------------------------------------------------------------------
+  opensearch:
+    image: opensearchproject/opensearch:2.13.0
+    container_name: netra-opensearch
+    restart: unless-stopped
+    environment:
+      - cluster.name=netra-cluster
+      - node.name=netra-node-1
+      - discovery.type=single-node
+      - bootstrap.memory_lock=true
+      - "OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m"
+      - DISABLE_SECURITY_PLUGIN=true
+      - DISABLE_INSTALL_DEMO_CONFIG=true
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    ports:
+      - "${OPENSEARCH_PORT:-9200}:9200"
+      - "9600:9600"
+    volumes:
+      - opensearch_data:/usr/share/opensearch/data
+    networks:
+      - netra-network
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s -f http://localhost:9200/_cluster/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # ----------------------------------------------------------------------------
+  # Neo4j: Graph Database for Attack Infrastructure & Campaign Relationships
+  # ----------------------------------------------------------------------------
+  neo4j:
+    image: neo4j:5.20.0-community
+    container_name: netra-neo4j
+    restart: unless-stopped
+    environment:
+      - NEO4J_AUTH=${NEO4J_USER:-neo4j}/${NEO4J_PASSWORD:-netra_secret_graph_2026}
+      - NEO4J_PLUGINS=["apoc"]
+      - NEO4J_dbms_memory_heap_initial__size=256m
+      - NEO4J_dbms_memory_heap_max__size=512m
+      - NEO4J_dbms_security_procedures_unrestricted=apoc.*
+    ports:
+      - "${NEO4J_HTTP_PORT:-7474}:7474" # Web Browser / HTTP API
+      - "${NEO4J_BOLT_PORT:-7687}:7687" # Bolt Protocol
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+    networks:
+      - netra-network
+    healthcheck:
+      test: ["CMD-SHELL", "wget --spider http://localhost:7474/ || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # ----------------------------------------------------------------------------
+  # MinIO: S3-Compatible Object Store for Raw EML, Attachments & Evidence
+  # ----------------------------------------------------------------------------
+  minio:
+    image: minio/minio:latest
+    container_name: netra-minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-netra_minio_admin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-netra_minio_secret_2026}
+    ports:
+      - "9000:9000" # S3 API
+      - "9001:9001" # Web Console
+    volumes:
+      - minio_data:/data
+    networks:
+      - netra-network
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:9000/minio/health/live || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ----------------------------------------------------------------------------
+  # MinIO Bucket Auto-Provisioner (Runs once on MinIO startup)
+  # ----------------------------------------------------------------------------
+  minio-init:
+    image: minio/mc:latest
+    container_name: netra-minio-init
+    depends_on:
+      minio:
+        condition: service_healthy
+    networks:
+      - netra-network
+    entrypoint: >
+      /bin/sh -c "
+      echo 'Configuring MinIO client alias...';
+      mc alias set netra_minio http://minio:9000 $${MINIO_ROOT_USER:-netra_minio_admin} $${MINIO_ROOT_PASSWORD:-netra_minio_secret_2026};
+      echo 'Creating core storage buckets...';
+      mc mb --ignore-existing netra_minio/raw-emails;
+      mc mb --ignore-existing netra_minio/attachments;
+      mc mb --ignore-existing netra_minio/quarantine;
+      mc mb --ignore-existing netra_minio/reports;
+      echo 'Securing bucket access policies...';
+      mc anonymous set none netra_minio/raw-emails;
+      mc anonymous set none netra_minio/attachments;
+      mc anonymous set none netra_minio/quarantine;
+      mc anonymous set none netra_minio/reports;
+      echo 'MinIO storage layer ready.';
+      exit 0;
+      "
+    restart: "no"
+
+  # ----------------------------------------------------------------------------
+  # Layer 1: Email Ingestion Service (FastAPI)
+  # ----------------------------------------------------------------------------
+  ingestion:
+    build:
+      context: .
+      dockerfile: services/ingestion/Dockerfile
+    container_name: netra-ingestion
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - ENVIRONMENT=${ENVIRONMENT:-development}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - PYTHONUNBUFFERED=1
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_ROOT_USER=${MINIO_ROOT_USER:-netra_minio_admin}
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD:-netra_minio_secret_2026}
+      - MINIO_SECURE=false
+    depends_on:
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    networks:
+      - netra-network
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ----------------------------------------------------------------------------
+  # Layer 2: Preprocessing & Parser Service (Python Worker)
+  # ----------------------------------------------------------------------------
+  parser:
+    build:
+      context: .
+      dockerfile: services/parser/Dockerfile
+    container_name: netra-parser
+    restart: unless-stopped
+    environment:
+      - ENVIRONMENT=${ENVIRONMENT:-development}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - PYTHONUNBUFFERED=1
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_ROOT_USER=${MINIO_ROOT_USER:-netra_minio_admin}
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD:-netra_minio_secret_2026}
+      - MINIO_SECURE=false
+    depends_on:
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    networks:
+      - netra-network
+
+  # ----------------------------------------------------------------------------
+  # Layer 3: Security Analysis Engines (Python Worker)
+  # ----------------------------------------------------------------------------
+  analyzer:
+    build:
+      context: .
+      dockerfile: services/analyzer/Dockerfile
+    container_name: netra-analyzer
+    restart: unless-stopped
+    environment:
+      - ENVIRONMENT=${ENVIRONMENT:-development}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - PYTHONUNBUFFERED=1
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+    depends_on:
+      redis:
+        condition: service_healthy
+      parser:
+        condition: service_started
+    networks:
+      - netra-network
+
+  # ----------------------------------------------------------------------------
+  # Layer 4: Threat Engine & Classification (Python Worker)
+  # ----------------------------------------------------------------------------
+  threat_engine:
+    build:
+      context: .
+      dockerfile: services/threat_engine/Dockerfile
+    container_name: netra-threat-engine
+    restart: unless-stopped
+    environment:
+      - ENVIRONMENT=${ENVIRONMENT:-development}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - PYTHONUNBUFFERED=1
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+    depends_on:
+      redis:
+        condition: service_healthy
+      analyzer:
+        condition: service_started
+    networks:
+      - netra-network
+
+  # ----------------------------------------------------------------------------
+  # Layer 5: Threat Intelligence Enrichment (Python Worker)
+  # ----------------------------------------------------------------------------
+  threat_intel:
+    build:
+      context: .
+      dockerfile: services/threat_intel/Dockerfile
+    container_name: netra-threat-intel
+    restart: unless-stopped
+    environment:
+      - ENVIRONMENT=${ENVIRONMENT:-development}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - PYTHONUNBUFFERED=1
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+    depends_on:
+      redis:
+        condition: service_healthy
+      threat_engine:
+        condition: service_started
+    networks:
+      - netra-network
+
+  # ----------------------------------------------------------------------------
+  # Layer 6: Graph Correlation & Campaign Detection (Python Worker)
+  # ----------------------------------------------------------------------------
+  correlation:
+    build:
+      context: .
+      dockerfile: services/correlation/Dockerfile
+    container_name: netra-correlation
+    restart: unless-stopped
+    environment:
+      - ENVIRONMENT=${ENVIRONMENT:-development}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - PYTHONUNBUFFERED=1
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - NEO4J_HOST=neo4j
+      - NEO4J_BOLT_PORT=7687
+      - NEO4J_USER=${NEO4J_USER:-neo4j}
+      - NEO4J_PASSWORD=${NEO4J_PASSWORD:-netra_secret_graph_2026}
+    depends_on:
+      redis:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
+      threat_intel:
+        condition: service_started
+    networks:
+      - netra-network
+
+  # ----------------------------------------------------------------------------
+  # Layers 7 & 9: API Gateway & PostgreSQL Persistence (FastAPI)
+  # ----------------------------------------------------------------------------
+  api_gateway:
+    build:
+      context: .
+      dockerfile: services/api_gateway/Dockerfile
+    container_name: netra-api-gateway
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      - ENVIRONMENT=${ENVIRONMENT:-development}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - PYTHONUNBUFFERED=1
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=${POSTGRES_DB:-netra_db}
+      - POSTGRES_USER=${POSTGRES_USER:-netra_admin}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-netra_secure_password_2026}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      correlation:
+        condition: service_started
+    networks:
+      - netra-network
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8080/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ----------------------------------------------------------------------------
+  # Makeshift Testing UI: Streamlit Interactive Dashboard
+  # ----------------------------------------------------------------------------
+  streamlit_ui:
+    build:
+      context: ./frontend_test
+      dockerfile: Dockerfile
+    container_name: netra-streamlit-ui
+    restart: unless-stopped
+    ports:
+      - "8501:8501"
+    environment:
+      - INGESTION_URL=http://ingestion:8000
+      - API_GATEWAY_URL=http://api_gateway:8080
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - PYTHONUNBUFFERED=1
+    depends_on:
+      ingestion:
+        condition: service_healthy
+      api_gateway:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - netra-network
+
+  # ----------------------------------------------------------------------------
+  # Netra Next.js Production Web UI (नेTRA SIH26106)
+  # ----------------------------------------------------------------------------
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: netra-frontend
+    restart: unless-stopped
+    ports:
+      - "${FRONTEND_PORT:-3000}:3000"
+    environment:
+      - NEXT_PUBLIC_INGESTION_URL=http://localhost:8000
+      - NEXT_PUBLIC_GATEWAY_URL=http://localhost:8080
+    depends_on:
+      ingestion:
+        condition: service_healthy
+      api_gateway:
+        condition: service_healthy
+    networks:
+      - netra-network
+
+
+# ==============================================================================
+# Isolated Virtual Networks
+# ==============================================================================
+networks:
+  netra-network:
+    name: netra-network
+    driver: bridge
+
+# ==============================================================================
+# Persistent Named Volumes
+# ==============================================================================
+volumes:
+  postgres_data:
+    name: netra_postgres_data
+  redis_data:
+    name: netra_redis_data
+  opensearch_data:
+    name: netra_opensearch_data
+  neo4j_data:
+    name: netra_neo4j_data
+  neo4j_logs:
+    name: netra_neo4j_logs
+  minio_data:
+    name: netra_minio_data

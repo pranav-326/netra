@@ -1,0 +1,43 @@
+From: "IT Support Desk" <security@micros0ft-portal.com>
+To: "Corporate User" <victim@company.internal>
+Subject: CRITICAL: Immediate Password Reset Required for Corporate Account
+Date: Mon, 07 Sep 2026 12:00:00 +0000
+Message-ID: <20260907120000.84920@micros0ft-portal.com>
+Authentication-Results: mx.company.internal; spf=fail (domain micros0ft-portal.com does not designate sender IP) smtp.mailfrom=security@micros0ft-portal.com; dkim=none; dmarc=fail
+Received: from mail.micros0ft-portal.com ([198.51.100.42]) by mx.company.internal with ESMTP; Mon, 07 Sep 2026 12:00:01 +0000
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="====_BOUNDARY_NETRA_TEST_===="
+
+--====_BOUNDARY_NETRA_TEST_====
+Content-Type: text/plain; charset="utf-8"
+
+URGENT ACTION REQUIRED:
+Your corporate account has been flagged for suspicious login activity.
+You must verify your account and confirm your login credentials within 24 hours to prevent account suspension.
+
+Please click the secure link below to verify:
+https://micros0ft.com/account-verification/login.php
+
+Also review the attached security update instructions. Also check our portal at hxxps://paypal.security-update[.]org
+
+Regards,
+Corporate Security Team
+
+--====_BOUNDARY_NETRA_TEST_====
+Content-Type: text/html; charset="utf-8"
+
+<html>
+<body>
+<h2 style="color:red;">URGENT ACTION REQUIRED</h2>
+<p>Your corporate account has been flagged for unauthorized activity.</p>
+<p>Please click <a href="https://micros0ft.com/account-verification/login.php">here to verify your login credentials</a> within 24 hours.</p>
+<p>Also note that an immediate wire transfer approval was requested for your division.</p>
+</body>
+</html>
+
+--====_BOUNDARY_NETRA_TEST_====
+Content-Type: application/octet-stream
+Content-Disposition: attachment; filename="security_patch_update.pdf.exe"
+
+MZ_MOCK_EXECUTABLE_CONTENT_FOR_NETRA_TESTING_1234567890
+--====_BOUNDARY_NETRA_TEST_====--

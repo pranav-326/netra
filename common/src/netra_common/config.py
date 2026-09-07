@@ -1,0 +1,69 @@
+"""Centralized configuration definitions for Netra services."""
+
+from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import Field
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore"
+    )
+
+    # Environment
+    ENVIRONMENT: str = Field(default="development")
+    LOG_LEVEL: str = Field(default="INFO")
+
+    # PostgreSQL (Layer 8)
+    POSTGRES_HOST: str = Field(default="localhost")
+    POSTGRES_PORT: int = Field(default=5432)
+    POSTGRES_DB: str = Field(default="netra_db")
+    POSTGRES_USER: str = Field(default="netra_admin")
+    POSTGRES_PASSWORD: str = Field(default="netra_secure_password_2026")
+
+    @property
+    def postgres_async_url(self) -> str:
+        return f"postgresql+asyncpg://{self.POSTGRES_USER}:{self.POSTGRES_PASSWORD}@{self.POSTGRES_HOST}:{self.POSTGRES_PORT}/{self.POSTGRES_DB}"
+
+    # Redis (Layer 8)
+    REDIS_HOST: str = Field(default="localhost")
+    REDIS_PORT: int = Field(default=6379)
+    REDIS_PASSWORD: str = Field(default="")
+
+    @property
+    def redis_url(self) -> str:
+        if self.REDIS_PASSWORD:
+            return f"redis://:{self.REDIS_PASSWORD}@{self.REDIS_HOST}:{self.REDIS_PORT}/0"
+        return f"redis://{self.REDIS_HOST}:{self.REDIS_PORT}/0"
+
+    # OpenSearch (Layer 8)
+    OPENSEARCH_HOST: str = Field(default="localhost")
+    OPENSEARCH_PORT: int = Field(default=9200)
+
+    @property
+    def opensearch_url(self) -> str:
+        return f"http://{self.OPENSEARCH_HOST}:{self.OPENSEARCH_PORT}"
+
+    # Neo4j (Layer 8)
+    NEO4J_HOST: str = Field(default="localhost")
+    NEO4J_BOLT_PORT: int = Field(default=7687)
+    NEO4J_USER: str = Field(default="neo4j")
+    NEO4J_PASSWORD: str = Field(default="netra_secret_graph_2026")
+
+    @property
+    def neo4j_bolt_url(self) -> str:
+        return f"bolt://{self.NEO4J_HOST}:{self.NEO4J_BOLT_PORT}"
+
+    # MinIO / S3 (Layer 8)
+    MINIO_ENDPOINT: str = Field(default="localhost:9000")
+    MINIO_ROOT_USER: str = Field(default="netra_minio_admin")
+    MINIO_ROOT_PASSWORD: str = Field(default="netra_minio_secret_2026")
+    MINIO_SECURE: bool = Field(default=False)
+    RAW_EMAILS_BUCKET: str = Field(default="raw-emails")
+    ATTACHMENTS_BUCKET: str = Field(default="attachments")
+    QUARANTINE_BUCKET: str = Field(default="quarantine")
+    REPORTS_BUCKET: str = Field(default="reports")
+
+
+settings = Settings()

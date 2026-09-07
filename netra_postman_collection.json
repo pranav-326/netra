@@ -1,0 +1,129 @@
+{
+  "info": {
+    "_postman_id": "netra-threat-pipeline-api",
+    "name": "Netra Email Threat Intelligence Pipeline",
+    "description": "Postman collection for testing Netra Ingestion, Parsing, and Analysis microservices.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "1. Health Check",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "http://localhost:8000/health",
+          "protocol": "http",
+          "host": [
+            "localhost"
+          ],
+          "port": "8000",
+          "path": [
+            "health"
+          ]
+        },
+        "description": "Verify that the Ingestion API, Redis broker, and MinIO object store are reachable and healthy."
+      },
+      "response": []
+    },
+    {
+      "name": "2. Ingest Email Text (Credential Harvesting & Typosquatting)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json",
+            "type": "text"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"raw_email\": \"From: Security Desk <alert@micros0ft-support.com>\\nTo: victim@corp.internal\\nSubject: Critical Security Notice: Reset Password Immediately\\nDate: Mon, 7 Sep 2026 12:00:00 +0000\\nMessage-ID: <test101@micros0ft-support.com>\\nAuthentication-Results: mx.corp.internal; spf=fail; dkim=none; dmarc=fail\\n\\nURGENT: Immediate action required! Your login credentials have expired.\\nPlease verify your account within 24 hours at https://micros0ft.com/account/login.php to avoid account suspension.\\n\\nAlso visit our backup portal at hxxps://paypal.security-verify[.]org\"\n}"
+        },
+        "url": {
+          "raw": "http://localhost:8000/api/v1/ingest/text",
+          "protocol": "http",
+          "host": [
+            "localhost"
+          ],
+          "port": "8000",
+          "path": [
+            "api",
+            "v1",
+            "ingest",
+            "text"
+          ]
+        },
+        "description": "Ingest raw email text containing spoofed authentication, brand typosquatting (micros0ft.com), defanged URLs, and urgency/credential harvesting triggers."
+      },
+      "response": []
+    },
+    {
+      "name": "3. Ingest Email Text (BEC / Wire Transfer Solicitations)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json",
+            "type": "text"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"raw_email\": \"From: CEO Executive Office <ceo@external-mail.net>\\nTo: finance@corp.internal\\nSubject: Urgent: Confidential Wire Transfer Request\\nDate: Mon, 7 Sep 2026 12:15:00 +0000\\nMessage-ID: <bec202@external-mail.net>\\n\\nPlease process an immediate wire transfer for the overdue invoice attached.\\nUpdated banking details and routing number are in the portal at http://198.51.100.25/invoice-view.\\nAlso expedite the requested apple gift card vouchers for the client meeting today.\\n\\nRegards,\\nChief Executive Officer\"\n}"
+        },
+        "url": {
+          "raw": "http://localhost:8000/api/v1/ingest/text",
+          "protocol": "http",
+          "host": [
+            "localhost"
+          ],
+          "port": "8000",
+          "path": [
+            "api",
+            "v1",
+            "ingest",
+            "text"
+          ]
+        },
+        "description": "Ingest raw email text containing Business Email Compromise (BEC) triggers: wire transfer, gift card, bare IP host URL, and invoice bait."
+      },
+      "response": []
+    },
+    {
+      "name": "4. Ingest .EML File (Multipart Upload)",
+      "request": {
+        "method": "POST",
+        "header": [],
+        "body": {
+          "mode": "formdata",
+          "formdata": [
+            {
+              "key": "file",
+              "type": "file",
+              "src": "tests/samples/phishing_sample.eml"
+            }
+          ]
+        },
+        "url": {
+          "raw": "http://localhost:8000/api/v1/ingest/file",
+          "protocol": "http",
+          "host": [
+            "localhost"
+          ],
+          "port": "8000",
+          "path": [
+            "api",
+            "v1",
+            "ingest",
+            "file"
+          ]
+        },
+        "description": "Upload a raw .eml file containing RFC 5322 headers, HTML/plain multipart bodies, and a dangerous double-extension attachment (.pdf.exe)."
+      },
+      "response": []
+    }
+  ]
+}
