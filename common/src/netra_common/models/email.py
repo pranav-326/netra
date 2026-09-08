@@ -68,6 +68,8 @@ class HeaderAnalysisResult(BaseModel):
     dkim_verdict: str = Field(default="missing", description="DKIM check result (pass, fail, none, missing)")
     dmarc_verdict: str = Field(default="missing", description="DMARC check result (pass, fail, none, missing)")
     has_authentication_results: bool = Field(default=False, description="Whether Authentication-Results header was present")
+    authres_header_count: int = Field(default=0, description="Number of Authentication-Results headers found on the message")
+    has_conflicting_auth_results: bool = Field(default=False, description="Multiple Authentication-Results headers disagree, a hallmark of a prepended forgery")
     auth_anomalies: List[str] = Field(default_factory=list, description="Specific authentication irregularities or failures flagged")
 
 

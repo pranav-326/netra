@@ -1,0 +1,8 @@
+# Offline training dependencies for the Layer 4 scoring model.
+# NOT installed in any service image: the trained artifact is plain JSON and the
+# threat_engine evaluates it in pure Python. Training is a dev-machine activity.
+#   pip install -e ./common -r requirements-ml.txt
+#   python -m ml.corpus  --phishing data/phishing --benign data/benign --out data/features.jsonl
+#   python -m ml.train_scorer --features data/features.jsonl
+scikit-learn>=1.5.0
+numpy>=1.26.0

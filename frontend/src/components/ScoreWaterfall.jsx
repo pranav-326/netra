@@ -18,6 +18,9 @@ const CATEGORY_STYLE = {
   url: { bar: 'bg-orange-500', dot: 'bg-orange-500', text: 'text-orange-600 dark:text-orange-400', label: 'URL / Domain' },
   content: { bar: 'bg-amber-500', dot: 'bg-amber-500', text: 'text-amber-600 dark:text-amber-400', label: 'Content / BEC' },
   header: { bar: 'bg-blue-500', dot: 'bg-blue-500', text: 'text-blue-600 dark:text-blue-400', label: 'Header / Auth' },
+  // The learned layer gets a distinct colour: an analyst should see at a glance how
+  // much of a score came from the model rather than from a hand-written rule.
+  ml: { bar: 'bg-violet-500', dot: 'bg-violet-500', text: 'text-violet-600 dark:text-violet-400', label: 'Learned model' },
 };
 
 const FALLBACK_STYLE = {
@@ -56,6 +59,9 @@ export default function ScoreWaterfall({ contributions = [], finalScore = 0, raw
   // rule at its true width, with the ceiling marked separately.
   const axisMax = Math.max(raw, 100);
 
+  const mlCount = contributions.filter((c) => c.category === 'ml').length;
+  const ruleCount = contributions.length - mlCount;
+
   let running = 0;
   const steps = contributions.map((c) => {
     const start = running;
@@ -74,7 +80,7 @@ export default function ScoreWaterfall({ contributions = [], finalScore = 0, raw
             </h3>
           </div>
           <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
-            {steps.length} rule{steps.length === 1 ? '' : 's'} fired · deterministic and auditable by design
+            {ruleCount} rule{ruleCount === 1 ? '' : 's'} fired{mlCount ? ' + learned model' : ''} · deterministic and auditable by design
           </p>
         </div>
         <div className="text-right shrink-0">
@@ -95,8 +101,11 @@ export default function ScoreWaterfall({ contributions = [], finalScore = 0, raw
         <div className="space-y-2.5">
           {steps.map((step) => {
             const style = styleFor(step.category);
-            const offsetPct = (step.start / axisMax) * 100;
-            const widthPct = (step.points / axisMax) * 100;
+            // A negative contribution (only the model can produce one) draws backwards
+            // from the running total rather than off the left edge of the track.
+            const barStart = Math.min(step.start, step.end);
+            const offsetPct = (barStart / axisMax) * 100;
+            const widthPct = (Math.abs(step.points) / axisMax) * 100;
 
             return (
               <div key={step.rule_id} className="group">
@@ -111,7 +120,9 @@ export default function ScoreWaterfall({ contributions = [], finalScore = 0, raw
                     </span>
                   </div>
                   <div className="flex items-baseline gap-2 shrink-0 font-mono text-[11px]">
-                    <span className={`font-bold ${style.text}`}>+{step.points}</span>
+                    <span className={`font-bold ${style.text}`}>
+                      {step.points >= 0 ? `+${step.points}` : step.points}
+                    </span>
                     <span className="text-slate-400 w-8 text-right">{step.end}</span>
                   </div>
                 </div>
@@ -184,6 +195,14 @@ export default function ScoreWaterfall({ contributions = [], finalScore = 0, raw
             <span>100</span>
           </div>
         </div>
+
+        {steps.some((step) => step.category === 'ml') && (
+          <div className="text-[11px] text-violet-700 dark:text-violet-300 bg-violet-50 dark:bg-violet-950/30 border border-violet-200 dark:border-violet-900/50 rounded-lg p-2.5">
+            One bar comes from the learned classifier. It is capped and additive — a second
+            opinion, never an override — and decomposes into the same kind of per-feature
+            terms as every rule above.
+          </div>
+        )}
 
         {/* The design claim, stated plainly. */}
         <div className="flex items-start gap-2 text-[11px] text-slate-500 dark:text-slate-400 bg-slate-50 dark:bg-slate-950/50 border border-slate-200 dark:border-slate-800 rounded-lg p-3">

@@ -66,3 +66,6 @@ yarn-error.log*
 # Local Docker overrides
 docker-compose.override.yml
 docker-compose.override.yaml
+# ML training corpora (downloaded, not source)
+data/
+ml/reports/

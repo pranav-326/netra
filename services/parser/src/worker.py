@@ -48,8 +48,23 @@ URL_REGEX = re.compile(
 class EmailParserWorker:
     """Worker listening to Redis ingestion events and parsing emails into canonical models."""
 
-    def __init__(self):
+    def __init__(self, connect: bool = True):
+        """Create a parser worker.
+
+        `connect=False` builds an offline instance with no Redis, MinIO, or signal
+        handlers — used by the ML training pipeline so that corpus emails are parsed
+        by exactly the same code that parses production traffic. Any divergence here
+        would be train/serve skew, and would silently poison the model.
+        """
         self.running = True
+        self.redis_client = None
+        self.minio_client = None
+        self.events = None
+
+        if not connect:
+            logger.info("Parser worker constructed in offline mode (no Redis/MinIO).")
+            return
+
         logger.info("Initializing Netra Parser Worker...")
 
         # Redis synchronous client for reliable BRPOP
@@ -112,20 +127,23 @@ class EmailParserWorker:
             safe_filename = re.sub(r"[^\w\-.]", "_", filename)
             object_key = f"{email_id}/{sha256}_{safe_filename}"
 
-            # Save attachment bytes into MinIO attachments bucket
-            try:
-                self.minio_client.put_bytes(
-                    bucket_name=settings.ATTACHMENTS_BUCKET,
-                    object_name=object_key,
-                    data=payload,
-                    content_type=content_type,
-                )
-                logger.info(
-                    f"Stored attachment: {filename} (SHA256: {sha256[:12]}..., {size_bytes} bytes) -> {object_key}"
-                )
-            except Exception as e:
-                logger.error(f"Failed to store attachment {filename} for email {email_id}: {e}")
-                continue
+            # Save attachment bytes into MinIO. In offline mode there is no object
+            # store, but the metadata (name, hashes, size, MIME) is still produced —
+            # that is what the attachment engine and the ML features actually read.
+            if self.minio_client is not None:
+                try:
+                    self.minio_client.put_bytes(
+                        bucket_name=settings.ATTACHMENTS_BUCKET,
+                        object_name=object_key,
+                        data=payload,
+                        content_type=content_type,
+                    )
+                    logger.info(
+                        f"Stored attachment: {filename} (SHA256: {sha256[:12]}..., {size_bytes} bytes) -> {object_key}"
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to store attachment {filename} for email {email_id}: {e}")
+                    continue
 
             attachments_meta.append(
                 AttachmentMetadata(

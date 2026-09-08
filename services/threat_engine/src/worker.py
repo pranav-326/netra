@@ -20,7 +20,8 @@ from netra_common.models.email import (
     ClassifiedEmail,
     ThreatIntelligence,
 )
-from src.scorer import evaluate_threat_score
+from src.ml_scorer import get_scorer
+from src.scorer import apply_ml_contribution, evaluate_threat_score, finalize_score
 from src.ioc_extractor import extract_consolidated_iocs
 
 logging.basicConfig(
@@ -45,6 +46,8 @@ class ThreatEngineWorker:
             decode_responses=True,
         )
         self.events = PipelineEventPublisher(self.redis_client)
+        # Learned scoring layer. Absent artifact => rules-only, logged once at start.
+        self.ml = get_scorer()
 
         signal.signal(signal.SIGINT, self._handle_shutdown)
         signal.signal(signal.SIGTERM, self._handle_shutdown)
@@ -55,12 +58,17 @@ class ThreatEngineWorker:
 
     def classify_email(self, analyzed_email: AnalyzedEmail) -> ClassifiedEmail:
         """Run rule scoring algorithm and aggregate IOCs."""
-        # 1. Evaluate Rule-Based Threat Score & Classification
-        risk_score, verdict, matched_rules, contributions, raw_score = evaluate_threat_score(
-            analyzed_email.analysis
-        )
+        # 1. Deterministic rule engine.
+        _, _, _, contributions, _ = evaluate_threat_score(analyzed_email.analysis)
 
-        # 2. Extract and Deduplicate IOCs
+        # 2. Learned layer, appended as one more contribution. Returns the rule
+        #    contributions untouched when no model is loaded or inference fails.
+        contributions = apply_ml_contribution(contributions, self.ml.predict(analyzed_email))
+
+        # 3. Collapse to the final score and verdict in one shared place.
+        risk_score, verdict, matched_rules, raw_score = finalize_score(contributions)
+
+        # 4. Extract and Deduplicate IOCs
         iocs = extract_consolidated_iocs(analyzed_email.parsed_email, analyzed_email.analysis)
 
         threat_assessment = ThreatIntelligence(

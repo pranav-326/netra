@@ -175,6 +175,87 @@ Properties this buys, all covered by `tests/test_score_explainability.py`:
 
 ---
 
+## The learned scoring layer
+
+Netra's rule engine is a linear additive scorer with hand-set weights. This layer adds a
+**logistic regression** trained on labelled corpora, contributing one more bar to the same
+waterfall. It is a second opinion, never an override.
+
+### Why logistic regression, and not a deep model
+
+- The score is already `sum(weight x feature)`. A linear model keeps that arithmetic, so
+  the explanation stays **exact** — per-feature contribution is `coefficient x value`, and
+  those terms sum to the logit by definition. No SHAP or LIME approximation is needed
+  because nothing is opaque.
+- The artifact is **plain JSON a human can read** (11 coefficients, 4 KB). A pickle would
+  be opaque and a code-execution risk.
+- Inference is **pure Python** — no scikit-learn, numpy, or pickle in any service image.
+  Training is a dev-machine activity. Same email, same score, forever.
+
+### Measured performance
+
+Trained on **7,321 messages** (4,570 phishing / 2,751 benign) from the
+SpamAssassin public corpus (ham) and the Nazario phishing corpus — both chosen because
+they carry **full headers**, which half the features depend on.
+
+| Metric | Value |
+| :--- | ---: |
+| ROC AUC | **0.8669** |
+| PR AUC | 0.9208 |
+| Precision | 0.9512 |
+| Recall | 0.7258 |
+| Decision threshold | 0.4508 (derived, not chosen) |
+
+All figures are **stratified 5-fold out-of-fold** — no message contributes to the model
+that scores it. Confusion matrix: TN=2581, FP=170, FN=1253, TP=3317.
+The threshold is selected as the highest recall meeting a 95% precision target, which is
+the question the hand-tuned `61` could never answer.
+
+Full report including the ROC curve and the learned-vs-hand-set weight comparison:
+`ml/reports/evaluation.md`.
+
+### Two failures found during training, and what they cost
+
+**An earlier model scored ROC AUC 0.99 by learning the corpora apart, not phishing.**
+Its strongest features were `has_html_body` (+4.04) and `url_count` (-3.89): 2002
+mailing-list ham is plaintext, 2000s phishing is HTML, so the model learned the
+collection era. Signs were backwards on real signals — more URLs read as *safer*.
+Seven formatting features are now excluded by default (`FORMAT_LEAKAGE_FEATURES`), and
+honest accuracy fell from 0.99 to **0.8669**. That drop is the real number.
+
+**A near-constant feature flagged a clean email as SUSPICIOUS.** `auth_anomaly_count`
+had mean 3.998 and std 0.057 across training, because neither corpus predates
+SPF/DKIM deployment. Standardisation mapped a correctly authenticated modern email
+(0 anomalies) to **-70 sigma**, and a small coefficient turned that into +26 points.
+Two guards now exist: the trainer drops features with training std below `MIN_FEATURE_STD`
+(0.1), and inference clips any standardised value to ±5 sigma.
+
+### Honest limits
+
+- **The corpora predate SPF/DKIM/DMARC.** No message in either set carries an
+  `Authentication-Results` header, so all authentication features were dropped as
+  near-constant. The model contributes **nothing** on sender authentication — that
+  dimension is handled entirely by the rule engine. The two layers are complementary,
+  which is exactly why neither replaces the other.
+- **No executables appear in either corpus**, so attachment features were dropped too.
+  `ATT-EXEC` remains a pure rule.
+- Individual coefficients are not independently interpretable under correlated inputs;
+  only the **sum** is. See "Reading these coefficients" in the evaluation report.
+
+### Retraining
+
+```bash
+pip install -e ./common -r requirements-ml.txt
+python -m ml.corpus --phishing data/phishing --benign data/benign --out data/features.jsonl
+python -m ml.train_scorer --features data/features.jsonl
+```
+
+`ml/corpus.py` runs the **production** parser and analyzer over every corpus message
+rather than reimplementing extraction, so train/serve skew is structurally impossible.
+
+If the artifact is missing or malformed the pipeline logs it and runs rules-only —
+identical behaviour to before this layer existed.
+
 ## Layer 5: Threat Intelligence
 
 Two providers share one `enrich_iocs(iocs) -> EnrichmentData` interface, selected at

@@ -19,6 +19,22 @@ from netra_common.models.email import AnalysisResults, RuleContribution, ThreatV
 MALICIOUS_THRESHOLD = 61
 SUSPICIOUS_THRESHOLD = 21
 
+# Rules founded on an objective property of the message rather than an interpretation
+# of its language. An executable attachment either is or is not present; a URL either
+# does or does not point at a bare IP. No probability should be able to argue these
+# away, so when one of them fires the learned layer may only add points, never subtract.
+#
+# Without this floor the cap is one-directional: +25 cannot lift a 36 past the 61
+# malicious threshold, but -25 pulls a 61 down to 36 and silently downgrades a
+# MALICIOUS verdict to SUSPICIOUS. Content and header rules are deliberately excluded
+# — those are exactly the judgements a model trained on real corpora should be able
+# to moderate.
+HARD_EVIDENCE_RULES = frozenset({
+    "ATT-EXEC",       # a dangerous executable or script is attached
+    "ATT-EVASION",    # double extension or MIME/type mismatch
+    "URL-IP-HOST",    # a link points at a bare IP address
+})
+
 
 def evaluate_threat_score(
     analysis: AnalysisResults,
@@ -207,3 +223,88 @@ def evaluate_threat_score(
     ]
 
     return final_score, verdict, matched_rules, contributions, raw_score
+
+
+def apply_ml_contribution(
+    contributions: List[RuleContribution],
+    prediction,
+) -> List[RuleContribution]:
+    """Append the learned model's contribution to the rule contributions.
+
+    The model enters the score the same way every rule does — as one more
+    `RuleContribution` — so the waterfall, the SSE stage event, the API payload and
+    the PDF report all render it with no changes. Its `evidence` names the features
+    that actually drove the prediction, so the bar is as inspectable as a rule.
+
+    A `None` prediction (no artifact shipped, or inference failed) simply adds
+    nothing: the score stays exactly what the rules produced.
+
+    The cap alone is not symmetric protection. +max_points cannot lift a sub-threshold
+    score into MALICIOUS, but -max_points can drag a MALICIOUS score below the line.
+    When a hard-evidence rule has fired the negative direction is therefore floored at
+    zero, and the bar records that the model was overruled.
+    """
+    if prediction is None or prediction.points == 0:
+        return contributions
+
+    points = prediction.points
+
+    # The model may never talk down hard evidence (see HARD_EVIDENCE_RULES).
+    hard = sorted({c.rule_id for c in contributions} & HARD_EVIDENCE_RULES)
+    floored = False
+    if points < 0 and hard:
+        points = 0
+        floored = True
+
+    drivers = prediction.top_drivers(3, positive_only=prediction.points > 0)
+    if drivers:
+        driver_text = ", ".join(f"{d.label} ({d.contribution:+.2f})" for d in drivers)
+    else:
+        driver_text = "no single dominant feature"
+
+    evidence = (
+        f"p(phishing)={prediction.probability:.3f} vs threshold {prediction.threshold:.3f}; "
+        f"top drivers: {driver_text}; model {prediction.model_version}"
+    )
+
+    if floored:
+        evidence = (
+            f"model suggested {prediction.points:+d} pts but was floored to 0: "
+            f"hard evidence present ({', '.join(hard)}). " + evidence
+        )
+
+    # A floored prediction still gets a bar, at 0 points, so the report shows that the
+    # model was consulted and overruled rather than silently omitting it.
+    return contributions + [
+        RuleContribution(
+            rule_id="ML-PHISH",
+            category="ml",
+            label="Learned phishing classifier",
+            points=points,
+            evidence=evidence,
+        )
+    ]
+
+
+def finalize_score(contributions: List[RuleContribution]) -> Tuple[int, ThreatVerdict, List[str], int]:
+    """Collapse contributions into the final score, verdict and prose.
+
+    Shared by the rules-only and rules-plus-model paths so there is exactly one place
+    where clamping and the verdict thresholds are applied.
+    """
+    raw_score = sum(c.points for c in contributions)
+    final_score = max(0, min(raw_score, 100))
+
+    if final_score >= MALICIOUS_THRESHOLD:
+        verdict = ThreatVerdict.MALICIOUS
+    elif final_score >= SUSPICIOUS_THRESHOLD:
+        verdict = ThreatVerdict.SUSPICIOUS
+    else:
+        verdict = ThreatVerdict.BENIGN
+
+    matched_rules = [
+        f"{c.label} ({c.points:+d} pts)" + (f" - {c.evidence}" if c.evidence else "")
+        for c in contributions
+    ]
+
+    return final_score, verdict, matched_rules, raw_score
