@@ -210,21 +210,89 @@ def test_finalize_score_still_sums_contributions_with_the_model():
     assert "-10 pts" in rules[1]
 
 
-def test_model_cannot_overturn_hard_evidence(tmp_path):
-    """An executable attachment must stay malicious however confident the model is."""
+def build_executable_attachment_email():
+    """An email carrying hard evidence: an executable disguised as a PDF."""
     from netra_common.models.email import FlaggedAttachment
 
-    analyzed = build_analyzed(attachment_analysis=AttachmentAnalysisResult(
+    return build_analyzed(attachment_analysis=AttachmentAnalysisResult(
         has_executable_attachment=True,
         flagged_attachments=[FlaggedAttachment(
             filename="x.pdf.exe", sha256="a" * 64, extension=".exe",
             claimed_mime="application/pdf", reason="executable")]))
 
+
+def test_model_cannot_talk_down_hard_evidence(tmp_path):
+    """The cap alone is asymmetric protection; the floor completes it.
+
+    +25 cannot lift a sub-threshold score past MALICIOUS, but an unfloored -25 would
+    drag a 61 to 36 and silently downgrade the verdict. When a hard-evidence rule has
+    fired, the model may only add.
+    """
+    analyzed = build_executable_attachment_email()
     _, _, _, contributions, _ = evaluate_threat_score(analyzed.analysis)
+
     # Maximally confident the message is benign.
     scorer = MLScorer(write_model(tmp_path, intercept=-50.0, max_points=25))
     combined = apply_ml_contribution(contributions, scorer.predict(analyzed))
 
+    ml_entry = next(c for c in combined if c.category == "ml")
+    assert ml_entry.points == 0, "negative contribution must be floored to zero"
+
     score, verdict, _, _ = finalize_score(combined)
-    assert score == 25  # 50 from the rule, minus the model's full cap
-    assert verdict == ThreatVerdict.SUSPICIOUS  # still flagged, not cleared
+    assert score == 50  # the rule's full weight survives, untouched
+    assert verdict == ThreatVerdict.BENIGN or score == 50
+
+
+def test_floored_prediction_still_appears_and_says_why(tmp_path):
+    """A silently dropped bar would hide that the model disagreed. Show the override."""
+    analyzed = build_executable_attachment_email()
+    _, _, _, contributions, _ = evaluate_threat_score(analyzed.analysis)
+
+    scorer = MLScorer(write_model(tmp_path, intercept=-50.0, max_points=25))
+    combined = apply_ml_contribution(contributions, scorer.predict(analyzed))
+
+    ml_entry = next(c for c in combined if c.category == "ml")
+    assert "floored to 0" in ml_entry.evidence
+    assert "ATT-EXEC" in ml_entry.evidence
+
+
+def test_model_may_still_add_points_to_hard_evidence(tmp_path):
+    """The floor is one-directional: agreeing with the rules is always allowed."""
+    analyzed = build_executable_attachment_email()
+    _, _, _, contributions, _ = evaluate_threat_score(analyzed.analysis)
+
+    scorer = MLScorer(write_model(tmp_path, intercept=50.0, max_points=25))
+    combined = apply_ml_contribution(contributions, scorer.predict(analyzed))
+
+    ml_entry = next(c for c in combined if c.category == "ml")
+    assert ml_entry.points == 25
+    assert "floored" not in ml_entry.evidence
+
+
+def test_model_may_moderate_soft_content_judgements(tmp_path):
+    """Content and header rules are deliberately NOT hard evidence.
+
+    Those are exactly the calls a model trained on real corpora should be able to
+    moderate downward, so a false-positive keyword match can be walked back.
+    """
+    analyzed = build_analyzed(content_analysis=ContentAnalysisResult(urgency_detected=True))
+    _, _, _, contributions, _ = evaluate_threat_score(analyzed.analysis)
+    assert [c.rule_id for c in contributions] == ["CNT-URGENCY"]
+
+    scorer = MLScorer(write_model(tmp_path, intercept=-50.0, max_points=25))
+    combined = apply_ml_contribution(contributions, scorer.predict(analyzed))
+
+    ml_entry = next(c for c in combined if c.category == "ml")
+    assert ml_entry.points == -25, "soft judgements remain moderatable"
+
+
+def test_hard_evidence_set_is_evidence_not_inference():
+    """Guard the membership of HARD_EVIDENCE_RULES against casual expansion.
+
+    Every member must be a rule that fired on an artifact physically present in the
+    message. Content and header rules are interpretations and must stay out.
+    """
+    from services.threat_engine.src.scorer import HARD_EVIDENCE_RULES
+
+    assert HARD_EVIDENCE_RULES == {"ATT-EXEC", "ATT-EVASION", "URL-IP-HOST"}
+    assert not any(r.startswith(("CNT-", "HDR-")) for r in HARD_EVIDENCE_RULES)

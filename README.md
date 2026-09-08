@@ -9,7 +9,7 @@ Netra is an enterprise-grade Email Threat Intelligence and Forensic Analysis Pla
 The system is decomposed into 10 logical layers:
 - **Layer 1: Input Layer (Email Ingestion)** - `.eml` uploads, raw RFC 5322 text, IMAP/SMTP hooks.
 - **Layer 2: Preprocessing & Parsing** - Header chain analysis, HTML normalization, attachment decoding, URL extraction.
-- **Layer 3: Analysis Engines** - SPF/DKIM/DMARC authentication, URL lexical/reputation checks, content NLP, attachment forensics.
+- **Layer 3: Analysis Engines** - reads the MTA's SPF/DKIM/DMARC verdict (see [What "SPF/DKIM/DMARC" means here](#what-spfdkimdmarc-means-here)), URL lexical checks and typosquat detection, content/BEC keyword heuristics, attachment forensics.
 - **Layer 4: Threat Engine** - IOC correlation, YARA rule evaluation, behavioral indicators, ML threat classification.
 - **Layer 5: Threat Intelligence** - Multi-source threat enrichment (VirusTotal, AbuseIPDB, WHOIS, URLhaus, MISP).
 - **Layer 6: Correlation & Graph Analysis** - Infrastructure mapping in Neo4j, campaign similarity clustering.
@@ -137,6 +137,35 @@ Consequences of that rule, enforced in the code:
 
 ---
 
+## What "SPF/DKIM/DMARC" means here
+
+The header engine **reads** the `Authentication-Results` header the receiving MTA wrote.
+It does not perform its own DNS lookup or verify a DKIM signature cryptographically. That
+is normal for a downstream analyzer sitting behind a mail gateway, but it must be stated
+plainly rather than left to imply crypto Netra does not do.
+
+### Which direction evasion runs
+
+The scoring rules only ever **add** points on authentication *failure* — there is no rule
+that subtracts points for a pass. So forging `spf=pass` in an uploaded `.eml` cannot
+inflate a score; it can only **suppress** one that the failure rules would otherwise have
+added. Evasion runs downward, never upward.
+
+The practical consequences:
+
+- An attacker cannot use Netra to manufacture a false accusation against a clean message.
+- An attacker *can* hide up to 20 points of authentication signal by forging a pass in a
+  file they control. Every other vector — attachments, URLs, content, graph correlation —
+  is unaffected, because those are derived from the message body and its artifacts rather
+  than from a header the sender can write.
+- In the deployed path this matters much less than in the upload path: an email arriving
+  through a real MTA carries an `Authentication-Results` header the MTA stamped, not one
+  the sender chose.
+
+The honest framing for this is *"we consume the receiving MTA's authentication verdict"*,
+not *"we validate SPF/DKIM/DMARC"*. Performing genuine SPF resolution and DKIM signature
+verification in the analyzer is the natural next step, and would close the upload-path gap.
+
 ## Explainability: the score is the explanation
 
 Netra scores with a deterministic rule engine, and the risk score is *defined* as the
@@ -169,9 +198,13 @@ Properties this buys, all covered by `tests/test_score_explainability.py`:
 - **Honest about the ceiling.** `score_before_clamp` is preserved, so a message whose
   evidence sums to 210 shows "clamped from 210 to 100" instead of silently capping.
 
-> Netra deliberately ships no ML classifier. For an evidentiary tool where an analyst
-> must justify a quarantine decision, a rule engine that shows its arithmetic is a
-> stronger position than a model that needs SHAP to guess at its own reasoning.
+> Netra ships **no opaque classifier**. A learned layer was added on top of these rules
+> (see [The learned scoring layer](#the-learned-scoring-layer)), but it is a logistic
+> regression whose per-feature contributions are exact and additive — it renders as one
+> more bar in the same waterfall. For an evidentiary tool where an analyst must justify a
+> quarantine decision, a scorer that shows its arithmetic beats a model that needs SHAP to
+> guess at its own reasoning. The learned layer was chosen precisely because it preserves
+> that property rather than trading it away.
 
 ---
 
@@ -180,6 +213,46 @@ Properties this buys, all covered by `tests/test_score_explainability.py`:
 Netra's rule engine is a linear additive scorer with hand-set weights. This layer adds a
 **logistic regression** trained on labelled corpora, contributing one more bar to the same
 waterfall. It is a second opinion, never an override.
+
+### Can the model override the rules?
+
+Not any more — but the cap alone did not guarantee that, and the asymmetry is worth
+understanding because it is the kind of bug a cap makes easy to miss.
+
+The model is bounded to ±25 points. In the **positive** direction that is genuinely safe:
++25 cannot lift a sub-threshold score past the 61 MALICIOUS boundary on its own. In the
+**negative** direction it was not: −25 would drag a score of 61 down to 36 and silently
+downgrade a MALICIOUS verdict to SUSPICIOUS. A cap is symmetric; a threshold is not.
+
+The fix is a floor. When a **hard-evidence** rule has fired, the model may only add:
+
+```python
+HARD_EVIDENCE_RULES = frozenset({
+    "ATT-EXEC",     # a dangerous executable or script is attached
+    "ATT-EVASION",  # double extension or MIME/type mismatch
+    "URL-IP-HOST",  # a link points at a bare IP address
+})
+```
+
+Membership is deliberately narrow: every member is a rule that fired on an **artifact
+physically present in the message**, not an interpretation of it. Content and header
+rules are excluded on purpose — a keyword match is exactly the kind of judgement a model
+trained on real corpora *should* be able to moderate downward, and false-positive
+suppression is half the value of adding a learned layer at all.
+
+A floored prediction still gets a bar, at 0 points, recording that the model was
+consulted and overruled:
+
+```
+ATT-EXEC      +50
+ML-PHISH       +0   model suggested -1 pts but was floored to 0:
+                    hard evidence present (ATT-EXEC). p(phishing)=0.435 ...
+```
+
+Silently dropping the bar would hide the disagreement. Four tests in
+`tests/test_ml_scorer.py` pin this: the floor applies, the floored bar still explains
+itself, positive contributions are unaffected, soft content judgements remain
+moderatable, and the `HARD_EVIDENCE_RULES` set is guarded against casual expansion.
 
 ### Why logistic regression, and not a deep model
 
@@ -250,8 +323,32 @@ python -m ml.corpus --phishing data/phishing --benign data/benign --out data/fea
 python -m ml.train_scorer --features data/features.jsonl
 ```
 
-`ml/corpus.py` runs the **production** parser and analyzer over every corpus message
-rather than reimplementing extraction, so train/serve skew is structurally impossible.
+### Train/serve skew is structurally impossible
+
+The usual way a model like this fails silently is feature drift: extraction is written
+once for training and again for production, the two implementations diverge, and the
+model scores excellently offline while behaving differently in the pipeline. Nothing
+about that failure is visible in the metrics.
+
+Netra removes the possibility rather than watching for it. `ml/corpus.py` constructs the
+**real** `EmailParserWorker(connect=False)` — the same class the parser service runs, with
+Redis and MinIO detached — and calls the **same** four Layer 3 engines the analyzer calls:
+
+```python
+parsed = parser.parse_rfc5322(raw_bytes=raw, email_id=email_id, ...)
+analysis = AnalysisResults(
+    header_analysis=analyze_headers(parsed.headers),
+    url_analysis=analyze_urls(parsed.extracted_urls),
+    content_analysis=analyze_content(parsed.body_plain, parsed.body_html, parsed.headers.subject),
+    attachment_analysis=analyze_attachments(parsed.attachments),
+)
+```
+
+Both paths then call one shared `extract_features()` in
+`services/threat_engine/src/features.py`. There is no second implementation to drift
+from — a corpus message and a live message travel identical code. `tests/test_ml_scorer.py`
+additionally asserts that the feature extractor and the canonical `FEATURE_NAMES` list
+agree exactly, so adding a feature in one place and forgetting the other fails the suite.
 
 If the artifact is missing or malformed the pipeline logs it and runs rules-only —
 identical behaviour to before this layer existed.
