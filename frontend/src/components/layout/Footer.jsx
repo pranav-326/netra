@@ -2,6 +2,7 @@
 
 import React from 'react';
 import Link from 'next/link';
+import NetraMark from '@/components/brand/NetraMark';
 
 export default function Footer() {
   return (
@@ -10,7 +11,14 @@ export default function Footer() {
         
         {/* Left: Copyright & Operational State */}
         <div className="flex items-center gap-3 flex-wrap justify-center md:justify-start">
-          <span>© 2025 200 OK — AI Email Forensics. SIH26106.</span>
+          <span className="inline-flex items-center gap-2">
+            <NetraMark className="w-5 h-5 text-brand-600 dark:text-brand-400" />
+            <span className="font-semibold text-slate-700 dark:text-slate-300">
+              <span className="text-brand-600 dark:text-brand-400">ने</span>TRA
+            </span>
+          </span>
+          <span className="text-slate-300 dark:text-slate-700">·</span>
+          <span>© 2026 200 OK — Email Threat Forensics. SIH26106.</span>
           <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-emerald-50 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-400 text-[11px] font-mono border border-emerald-200 dark:border-emerald-800/60">
             <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span>
             All Systems Operational

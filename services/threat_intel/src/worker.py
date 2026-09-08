@@ -13,11 +13,12 @@ import redis
 from pydantic import ValidationError
 
 from netra_common.config import settings
+from netra_common.events import PipelineEventPublisher, PipelineStage, StageTimer
 from netra_common.models.email import (
     ClassifiedEmail,
     EnrichedEmail,
 )
-from src.provider import MockIntelProvider
+from src.provider import build_intel_provider
 
 logging.basicConfig(
     level=settings.LOG_LEVEL,
@@ -40,7 +41,9 @@ class ThreatIntelWorker:
             settings.redis_url,
             decode_responses=True,
         )
-        self.provider = MockIntelProvider()
+        self.events = PipelineEventPublisher(self.redis_client)
+        # Live AbuseIPDB when a key is configured, simulated dataset otherwise.
+        self.provider = build_intel_provider(redis_client=self.redis_client)
 
         signal.signal(signal.SIGINT, self._handle_shutdown)
         signal.signal(signal.SIGTERM, self._handle_shutdown)
@@ -61,6 +64,8 @@ class ThreatIntelWorker:
         email_id = classified_email.email_id
         logger.info(f"Enriching IOCs for email {email_id}...")
 
+        timer = StageTimer()
+
         try:
             enrichment_data = self.provider.enrich_iocs(classified_email.threat_assessment.iocs)
             enriched_email = EnrichedEmail(
@@ -70,6 +75,8 @@ class ThreatIntelWorker:
             )
         except Exception as e:
             logger.exception(f"Error enriching email {email_id}: {e}")
+            self.events.emit(email_id, PipelineStage.ENRICHED, status="failed",
+                             latency_ms=timer.elapsed_ms, error=f"IOC enrichment failed: {e}")
             return
 
         # Push to correlation_queue
@@ -82,8 +89,19 @@ class ThreatIntelWorker:
                 f"ThreatActors={enrichment_data.threat_actors}. "
                 f"Dispatched to '{CORRELATION_QUEUE}'."
             )
+            self.events.emit(
+                email_id,
+                PipelineStage.ENRICHED,
+                latency_ms=timer.elapsed_ms,
+                detail=f"{enrichment_data.malicious_iocs_found}/{enrichment_data.total_iocs_checked} IOCs "
+                       f"flagged malicious"
+                       + (f" via {', '.join(enrichment_data.enrichment_sources)}" if enrichment_data.enrichment_sources else "")
+                       + (f", actors: {', '.join(enrichment_data.threat_actors)}" if enrichment_data.threat_actors else ""),
+            )
         except Exception as e:
             logger.error(f"Failed to push enriched email {email_id} to Redis: {e}")
+            self.events.emit(email_id, PipelineStage.ENRICHED, status="failed",
+                             latency_ms=timer.elapsed_ms, error=f"Queue dispatch failed: {e}")
 
     def run(self):
         """Worker main loop polling Redis via blocking pop."""

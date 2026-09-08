@@ -6,19 +6,32 @@ persisting finalized CorrelatedEmail records into PostgreSQL, and exposing REST 
 import asyncio
 import json
 import logging
+import os
+import time
 from contextlib import asynccontextmanager
 from typing import List, Optional, Dict, Any
 
-from fastapi import FastAPI, HTTPException, Depends, status, Query
+from fastapi import FastAPI, HTTPException, Depends, status, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import select, desc
 from sqlalchemy.ext.asyncio import AsyncSession
 import redis.asyncio as aioredis
 
 from netra_common.config import settings
+from netra_common.events import (
+    AsyncPipelineEventPublisher,
+    PipelineStage,
+    STAGE_SEQUENCE,
+    TERMINAL_STAGE,
+    TOTAL_STAGES,
+    channel_for,
+    read_event_log,
+)
 from netra_common.models.email import CorrelatedEmail
 from src.database import init_db, get_db_session, async_session_maker, EmailReport
+from src.graph_reader import GraphUnavailable, Neo4jGraphReader
 
 logging.basicConfig(
     level=settings.LOG_LEVEL,
@@ -28,9 +41,17 @@ logger = logging.getLogger("netra.api_gateway")
 
 FINAL_PERSISTENCE_QUEUE = "final_persistence_queue"
 
+# Upper bound on how long a browser may hold an SSE stream open waiting for a
+# pipeline to finish. A healthy run completes in well under a second, so this is
+# sized for fast, visible feedback when a worker is down rather than for patience.
+SSE_TIMEOUT_SECONDS = int(os.getenv("NETRA_SSE_TIMEOUT_SECONDS", "45"))
+SSE_HEARTBEAT_SECONDS = 15
+
 # Global consumer task handle
 consumer_task: Optional[asyncio.Task] = None
 redis_client: Optional[aioredis.Redis] = None
+event_publisher: Optional[AsyncPipelineEventPublisher] = None
+graph_reader: Optional[Neo4jGraphReader] = None
 
 
 async def persistence_worker_loop():
@@ -49,6 +70,7 @@ async def persistence_worker_loop():
                 continue
 
             _, raw_payload = result
+            stage_started = time.perf_counter()
 
             try:
                 data = json.loads(raw_payload)
@@ -98,6 +120,14 @@ async def persistence_worker_loop():
                 f"Verdict={verdict}, Score={risk_score}, Campaign={campaign_id or 'None'}"
             )
 
+            if event_publisher:
+                await event_publisher.emit(
+                    email_id,
+                    PipelineStage.PERSISTED,
+                    latency_ms=(time.perf_counter() - stage_started) * 1000.0,
+                    detail=f"Report committed to PostgreSQL: {verdict} at {risk_score}/100",
+                )
+
         except asyncio.CancelledError:
             logger.info("Persistence consumer task cancelled.")
             break
@@ -109,7 +139,7 @@ async def persistence_worker_loop():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Initialize database tables, Redis connection, and background persistence worker."""
-    global redis_client, consumer_task
+    global redis_client, consumer_task, event_publisher, graph_reader
     logger.info("Starting Netra API Gateway...")
 
     # Initialize PostgreSQL schema
@@ -121,6 +151,11 @@ async def lifespan(app: FastAPI):
 
     # Initialize Redis connection
     redis_client = aioredis.from_url(settings.redis_url, decode_responses=True)
+    event_publisher = AsyncPipelineEventPublisher(redis_client)
+
+    # Neo4j read-side for campaign subgraphs
+    graph_reader = Neo4jGraphReader()
+    await graph_reader.connect()
 
     # Launch background persistence consumer
     consumer_task = asyncio.create_task(persistence_worker_loop())
@@ -134,6 +169,9 @@ async def lifespan(app: FastAPI):
             await consumer_task
         except asyncio.CancelledError:
             pass
+
+    if graph_reader:
+        await graph_reader.close()
 
     if redis_client:
         await redis_client.close()
@@ -234,3 +272,140 @@ async def get_report_by_id(
         raise HTTPException(status_code=404, detail=f"Threat report for email {email_id} not found.")
 
     return record.full_report
+
+
+@app.get("/api/v1/pipeline/stages", tags=["Pipeline"])
+async def get_pipeline_stages():
+    """Return the canonical stage sequence so the UI renders labels from one source of truth."""
+    return {"total_stages": TOTAL_STAGES, "stages": STAGE_SEQUENCE}
+
+
+async def _pipeline_event_stream(email_id: str, request: Request):
+    """Yield SSE frames for one email: replayed history, then live stage transitions.
+
+    Replay comes first because the early stages routinely finish before the
+    browser opens its stream — without it the UI would miss stage 1 and 2.
+    """
+    if not redis_client:
+        yield _sse_frame("error", {"message": "Event bus unavailable"})
+        return
+
+    seen_stages = set()
+
+    # 1. Replay everything already recorded for this email.
+    for event in await read_event_log(redis_client, email_id):
+        seen_stages.add(event.get("stage"))
+        yield _sse_frame("stage", event)
+        if event.get("stage") == TERMINAL_STAGE or event.get("status") == "failed":
+            yield _sse_frame("done", {"email_id": email_id, "reason": "replayed_terminal"})
+            return
+
+    # 2. Follow live transitions.
+    pubsub = redis_client.pubsub()
+    await pubsub.subscribe(channel_for(email_id))
+    started = asyncio.get_event_loop().time()
+    last_heartbeat = started
+
+    try:
+        while True:
+            if await request.is_disconnected():
+                return
+
+            now = asyncio.get_event_loop().time()
+            if now - started > SSE_TIMEOUT_SECONDS:
+                yield _sse_frame("timeout", {
+                    "email_id": email_id,
+                    "message": f"No terminal stage within {SSE_TIMEOUT_SECONDS}s",
+                    "stages_seen": sorted(seen_stages),
+                })
+                return
+
+            message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
+
+            if message is None:
+                # Keep proxies from closing an idle connection.
+                if now - last_heartbeat >= SSE_HEARTBEAT_SECONDS:
+                    last_heartbeat = now
+                    yield ": heartbeat\n\n"
+                continue
+
+            try:
+                event = json.loads(message["data"])
+            except (json.JSONDecodeError, KeyError, TypeError):
+                continue
+
+            # Redis pub/sub can overlap with the replay above; don't double-render.
+            if event.get("stage") in seen_stages:
+                continue
+            seen_stages.add(event.get("stage"))
+
+            yield _sse_frame("stage", event)
+
+            if event.get("stage") == TERMINAL_STAGE or event.get("status") == "failed":
+                yield _sse_frame("done", {"email_id": email_id, "reason": "terminal_stage"})
+                return
+    finally:
+        try:
+            await pubsub.unsubscribe(channel_for(email_id))
+            await pubsub.aclose()
+        except Exception as exc:
+            logger.debug(f"Error closing pubsub for {email_id}: {exc}")
+
+
+def _sse_frame(event_name: str, data: Dict[str, Any]) -> str:
+    """Format one Server-Sent Events frame."""
+    return f"event: {event_name}\ndata: {json.dumps(data, default=str)}\n\n"
+
+
+@app.get("/api/v1/pipeline/events/{email_id}", tags=["Pipeline"])
+async def stream_pipeline_events(email_id: str, request: Request):
+    """Stream real pipeline stage transitions for an email over Server-Sent Events.
+
+    Each `stage` frame is emitted by the service that actually did the work, and
+    carries that service's measured latency. The stream terminates on the
+    persistence stage, on a stage failure, or after SSE_TIMEOUT_SECONDS.
+    """
+    return StreamingResponse(
+        _pipeline_event_stream(email_id, request),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@app.get("/api/v1/pipeline/events/{email_id}/history", tags=["Pipeline"])
+async def get_pipeline_event_history(email_id: str):
+    """Non-streaming fallback returning the recorded stage events for an email."""
+    if not redis_client:
+        raise HTTPException(status_code=503, detail="Event bus unavailable.")
+
+    events = await read_event_log(redis_client, email_id)
+    return {
+        "email_id": email_id,
+        "total_stages": TOTAL_STAGES,
+        "stages_completed": len([e for e in events if e.get("status") == "complete"]),
+        "events": events,
+    }
+
+
+@app.get("/api/v1/graph/{email_id}", tags=["Graph"])
+async def get_email_subgraph(email_id: str):
+    """Return the Neo4j attack-infrastructure subgraph centred on one email.
+
+    Nodes are the email itself, the IOCs it touches, other emails reaching those same
+    IOCs, and the campaign cluster. This is what backs the "shares infrastructure with
+    N other emails" claim in the forensic report.
+    """
+    if not graph_reader:
+        raise HTTPException(status_code=503, detail="Graph reader not initialized.")
+
+    try:
+        return await graph_reader.fetch_email_subgraph(email_id)
+    except GraphUnavailable as exc:
+        raise HTTPException(status_code=503, detail=f"Neo4j unavailable: {exc}")
+    except Exception as exc:
+        logger.error(f"Graph query failed for {email_id}: {exc}")
+        raise HTTPException(status_code=500, detail="Graph query failed.")

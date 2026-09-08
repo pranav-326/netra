@@ -3,6 +3,7 @@ FastAPI service accepting .eml uploads and raw email text, persisting to MinIO,
 and publishing ingestion events to Redis.
 """
 
+import time
 import uuid
 import logging
 from contextlib import asynccontextmanager
@@ -15,6 +16,7 @@ from pydantic import BaseModel, Field
 import redis.asyncio as aioredis
 
 from netra_common.config import settings
+from netra_common.events import AsyncPipelineEventPublisher, PipelineStage
 from netra_common.models.email import IngestionEvent
 from netra_common.storage.minio_client import MinioStorageClient
 
@@ -28,13 +30,14 @@ logger = logging.getLogger("netra.ingestion")
 # Global clients
 redis_client: aioredis.Redis = None
 minio_client: MinioStorageClient = None
+event_publisher: AsyncPipelineEventPublisher = None
 INGESTION_QUEUE = "email_ingestion_queue"
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Initialize Redis and MinIO storage clients on service startup."""
-    global redis_client, minio_client
+    global redis_client, minio_client, event_publisher
     logger.info("Initializing Netra Ingestion Service...")
 
     # Redis connection
@@ -51,6 +54,9 @@ async def lifespan(app: FastAPI):
         secure=settings.MINIO_SECURE,
     )
     minio_client.ensure_bucket(settings.RAW_EMAILS_BUCKET)
+
+    # Pipeline telemetry publisher (Layer 1 stage events)
+    event_publisher = AsyncPipelineEventPublisher(redis_client)
 
     logger.info("Ingestion Service dependencies initialized.")
     yield
@@ -123,6 +129,7 @@ async def health_check():
 )
 async def ingest_eml_file(file: UploadFile = File(...)):
     """Upload a raw .eml file."""
+    started = time.perf_counter()
     if not file.filename:
         raise HTTPException(status_code=400, detail="Missing file name.")
 
@@ -168,6 +175,14 @@ async def ingest_eml_file(file: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail="Message broker failure.")
 
     logger.info(f"Ingested EML file: email_id={email_id}, size={len(content)} bytes")
+
+    await event_publisher.emit(
+        email_id,
+        PipelineStage.INGESTED,
+        latency_ms=(time.perf_counter() - started) * 1000.0,
+        detail=f"Stored {file.filename} ({len(content)} bytes) to {settings.RAW_EMAILS_BUCKET}",
+    )
+
     return IngestionResponse(
         email_id=email_id,
         bucket=settings.RAW_EMAILS_BUCKET,
@@ -186,6 +201,7 @@ async def ingest_eml_file(file: UploadFile = File(...)):
 )
 async def ingest_raw_text(payload: RawEmailTextRequest):
     """Ingest raw email text/headers provided via JSON."""
+    started = time.perf_counter()
     raw_bytes = payload.raw_email.encode("utf-8")
     if not raw_bytes:
         raise HTTPException(status_code=400, detail="Raw email text is empty.")
@@ -222,6 +238,14 @@ async def ingest_raw_text(payload: RawEmailTextRequest):
         raise HTTPException(status_code=500, detail="Message broker failure.")
 
     logger.info(f"Ingested raw email text: email_id={email_id}, size={len(raw_bytes)} bytes")
+
+    await event_publisher.emit(
+        email_id,
+        PipelineStage.INGESTED,
+        latency_ms=(time.perf_counter() - started) * 1000.0,
+        detail=f"Stored {len(raw_bytes)} bytes of raw RFC 5322 text to {settings.RAW_EMAILS_BUCKET}",
+    )
+
     return IngestionResponse(
         email_id=email_id,
         bucket=settings.RAW_EMAILS_BUCKET,

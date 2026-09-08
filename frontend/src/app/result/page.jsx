@@ -24,16 +24,24 @@ import {
   Link as LinkIcon,
   Bug,
   X,
-  FileDown
+  FileDown,
+  Loader2,
+  AlertTriangle
 } from 'lucide-react';
 import { SAMPLE_CASE_0891, CASES_MAP } from '@/lib/sampleData';
 import { fetchReportDetails, pollReportDetails, resolveIpGeolocation } from '@/lib/api';
 import { transformBackendReport } from '@/lib/emlParser';
+import ScoreWaterfall from '@/components/ScoreWaterfall';
 
 function ResultContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const [caseData, setCaseData] = useState(SAMPLE_CASE_0891);
+  // 'live'   = scored by the backend threat_engine for this email,
+  // 'sample' = a bundled archive case browsed from the investigations list.
+  // There is no third source: every score shown on this page came from the backend.
+  const [provenance, setProvenance] = useState('sample');
+  const [loadError, setLoadError] = useState(null);
   const [copiedKey, setCopiedKey] = useState(null);
   const [showJsonModal, setShowJsonModal] = useState(false);
   const [copiedJson, setCopiedJson] = useState(false);
@@ -42,47 +50,56 @@ function ResultContent() {
   const [isLoadingGeo, setIsLoadingGeo] = useState(false);
 
   useEffect(() => {
-    // 1. Check for backend email ID first (most authoritative)
+    setLoadError(null);
+
+    // 1. A backend email id is authoritative: fetch the real persisted report.
+    //    If it never arrives we surface the failure rather than substituting a sample.
     const emailId = searchParams.get('id') || searchParams.get('email_id');
     if (emailId) {
       setIsLoadingLive(true);
-      pollReportDetails(emailId, 15, 500).then((res) => {
+      pollReportDetails(emailId, 20, 500).then((res) => {
         setIsLoadingLive(false);
-        if (res && (res.classification || res.email_id || res.threat_assessment)) {
-          const transformed = transformBackendReport(res);
-          if (transformed) {
-            transformed.backendEmailId = emailId;
-            setCaseData(transformed);
-          }
+
+        if (!res) {
+          setLoadError(
+            `No persisted report found for email ${emailId}. The pipeline accepted the email but ` +
+            `the report has not reached PostgreSQL. Check the analyzer, threat_engine, and ` +
+            `api_gateway container logs.`
+          );
+          return;
         }
+
+        const transformed = transformBackendReport(res);
+        if (!transformed) {
+          setLoadError(`Backend returned a report for ${emailId} that could not be rendered.`);
+          return;
+        }
+
+        transformed.backendEmailId = emailId;
+        setCaseData(transformed);
+        setProvenance('live');
       });
       return;
     }
 
-    // 2. Check query param for preset or specific case ID
+    // 2. A bundled archive case, browsed directly from the investigations list.
+    //    These are stored demonstrations, labelled as such — never a live verdict.
     const caseParam = searchParams.get('caseId') || searchParams.get('case');
     if (caseParam && CASES_MAP[caseParam]) {
       setCaseData(CASES_MAP[caseParam]);
-      return;
-    }
-
-    // 3. Fallback: Try to load newly analyzed report from sessionStorage
-    const stored = sessionStorage.getItem('netra_current_report');
-    if (stored) {
-      try {
-        const parsed = JSON.parse(stored);
-        if (parsed && parsed.caseId) {
-          setCaseData(parsed);
-        }
-      } catch (err) {
-        console.error('Failed reading stored report:', err);
-      }
+      setProvenance('sample');
     }
   }, [searchParams]);
 
-  // Dynamically resolve Real-World GeoIP, Country, and ASN for detected Ingress IP
+  // Dynamically resolve Real-World GeoIP, Country, and ASN for detected Ingress IP.
+  // Guarded against two races: resolving against the placeholder sample case while the
+  // live report is still in flight, and a slow lookup from a previous case landing after
+  // the user has moved on to a new one.
   useEffect(() => {
-    if (!caseData) return;
+    if (!caseData || isLoadingLive) return;
+
+    let cancelled = false;
+    setGeoInfo(null);
 
     // 1. Locate IP from IOC artifacts
     const ipArtifact = caseData.iocArtifacts?.find(i => (i.type || '').toUpperCase() === 'IP');
@@ -103,13 +120,16 @@ function ResultContent() {
     if (targetIp && /^[0-9.]+$/.test(targetIp)) {
       setIsLoadingGeo(true);
       resolveIpGeolocation(targetIp).then(geo => {
+        if (cancelled) return;
         setIsLoadingGeo(false);
         if (geo) {
           setGeoInfo(geo);
         }
       });
     }
-  }, [caseData]);
+
+    return () => { cancelled = true; };
+  }, [caseData, isLoadingLive]);
 
   const handleCopy = (key, text) => {
     navigator.clipboard.writeText(text);
@@ -129,7 +149,50 @@ function ResultContent() {
 
   return (
     <div className="space-y-6">
-      
+
+      {/* Provenance banner — states plainly where this report came from */}
+      {isLoadingLive && (
+        <div className="rounded-xl border border-blue-200 dark:border-blue-900 bg-blue-50 dark:bg-blue-950/40 p-3 flex items-center gap-3 text-xs text-blue-900 dark:text-blue-200">
+          <Loader2 className="w-4 h-4 animate-spin shrink-0" />
+          <span className="font-medium">Fetching the persisted report from the API Gateway…</span>
+        </div>
+      )}
+
+      {loadError && (
+        <div className="rounded-xl border border-red-300 dark:border-red-900 bg-red-50 dark:bg-red-950/40 p-4 flex items-start gap-3">
+          <AlertTriangle className="w-5 h-5 text-red-600 dark:text-red-400 shrink-0 mt-0.5" />
+          <div className="text-xs text-red-900 dark:text-red-200 space-y-1">
+            <div className="font-bold">Live report unavailable</div>
+            <p className="font-mono break-words">{loadError}</p>
+            <p className="opacity-80">
+              The report shown below is a bundled sample case, not the email you submitted.
+            </p>
+          </div>
+        </div>
+      )}
+
+      {!isLoadingLive && !loadError && provenance !== 'live' && (
+        <div className="rounded-xl border border-amber-300 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/40 p-3 flex items-start gap-3 text-xs text-amber-900 dark:text-amber-200">
+          <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
+          <div>
+            <span className="font-bold">Bundled sample case.</span>{' '}
+            An archived demonstration, not a live pipeline result. Submit an email from the
+            analysis page to get a scored report.
+          </div>
+        </div>
+      )}
+
+      {provenance === 'live' && (
+        <div className="rounded-xl border border-emerald-300 dark:border-emerald-800 bg-emerald-50 dark:bg-emerald-950/40 p-3 flex items-center gap-3 text-xs text-emerald-900 dark:text-emerald-200">
+          <Shield className="w-4 h-4 shrink-0" />
+          <span>
+            <span className="font-bold">Live pipeline report.</span>{' '}
+            Scored by the threat_engine service and read back from PostgreSQL
+            <span className="font-mono"> · email_id: {caseData.backendEmailId}</span>
+          </span>
+        </div>
+      )}
+
       {/* Top Threat Summary Banner */}
       <div className="rounded-2xl bg-white dark:bg-slate-900 border border-slate-200/80 dark:border-slate-800 shadow-sm p-6">
         <div className="flex flex-col lg:flex-row items-start lg:items-center justify-between gap-6">
@@ -229,6 +292,14 @@ function ResultContent() {
 
         </div>
       </div>
+
+      {/* Score explainability — the rules that summed to this verdict */}
+      <ScoreWaterfall
+        contributions={caseData.ruleContributions}
+        finalScore={caseData.riskScore}
+        rawScore={caseData.scoreBeforeClamp}
+        verdict={caseData.verdict}
+      />
 
       {/* Two Column Grid */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">

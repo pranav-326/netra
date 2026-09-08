@@ -286,6 +286,10 @@ services:
       - PYTHONUNBUFFERED=1
       - REDIS_HOST=redis
       - REDIS_PORT=6379
+      - ABUSEIPDB_API_KEY=${ABUSEIPDB_API_KEY:-}
+      - ABUSEIPDB_ENABLED=${ABUSEIPDB_ENABLED:-true}
+      - ABUSEIPDB_MALICIOUS_THRESHOLD=${ABUSEIPDB_MALICIOUS_THRESHOLD:-50}
+      - ABUSEIPDB_CACHE_TTL_SECONDS=${ABUSEIPDB_CACHE_TTL_SECONDS:-21600}
     depends_on:
       redis:
         condition: service_healthy
@@ -345,10 +349,16 @@ services:
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-netra_secure_password_2026}
       - REDIS_HOST=redis
       - REDIS_PORT=6379
+      - NEO4J_HOST=neo4j
+      - NEO4J_BOLT_PORT=7687
+      - NEO4J_USER=${NEO4J_USER:-neo4j}
+      - NEO4J_PASSWORD=${NEO4J_PASSWORD:-netra_secret_graph_2026}
     depends_on:
       postgres:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      neo4j:
         condition: service_healthy
       correlation:
         condition: service_started

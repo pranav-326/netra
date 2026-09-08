@@ -14,6 +14,7 @@ import redis
 from pydantic import ValidationError
 
 from netra_common.config import settings
+from netra_common.events import PipelineEventPublisher, PipelineStage, StageTimer
 from netra_common.models.email import (
     EnrichedEmail,
     CorrelatedEmail,
@@ -41,6 +42,7 @@ class CorrelationWorker:
             settings.redis_url,
             decode_responses=True,
         )
+        self.events = PipelineEventPublisher(self.redis_client)
         self.correlator = Neo4jCorrelator()
 
         signal.signal(signal.SIGINT, self._handle_shutdown)
@@ -63,6 +65,8 @@ class CorrelationWorker:
         email_id = enriched_email.email_id
         logger.info(f"Correlating email {email_id} in Neo4j graph...")
 
+        timer = StageTimer()
+
         try:
             correlation_data = self.correlator.correlate_email(enriched_email)
             correlated_email = CorrelatedEmail(
@@ -73,6 +77,8 @@ class CorrelationWorker:
             )
         except Exception as e:
             logger.exception(f"Error during graph correlation for email {email_id}: {e}")
+            self.events.emit(email_id, PipelineStage.CORRELATED, status="failed",
+                             latency_ms=timer.elapsed_ms, error=f"Graph correlation failed: {e}")
             return
 
         # Push to final_persistence_queue
@@ -85,8 +91,17 @@ class CorrelationWorker:
                 f"RelatedEmails={len(correlation_data.related_email_ids)}. "
                 f"Dispatched to '{FINAL_PERSISTENCE_QUEUE}'."
             )
+            self.events.emit(
+                email_id,
+                PipelineStage.CORRELATED,
+                latency_ms=timer.elapsed_ms,
+                detail=f"Campaign={correlation_data.campaign_id or 'none'}, "
+                       f"{len(correlation_data.related_email_ids)} related emails in graph",
+            )
         except Exception as e:
             logger.error(f"Failed to push correlated email {email_id} to Redis: {e}")
+            self.events.emit(email_id, PipelineStage.CORRELATED, status="failed",
+                             latency_ms=timer.elapsed_ms, error=f"Queue dispatch failed: {e}")
 
     def run(self):
         """Worker main loop polling Redis with blocking pop."""

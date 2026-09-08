@@ -3,6 +3,11 @@
 @tailwind utilities;
 
 :root {
+  /* Netra brand */
+  --brand: #0F3BB0;
+  --brand-strong: #0d3193;
+  --brand-tint: #eef3fc;
+
   --bg-primary: #f4f6f8;
   --bg-card: #ffffff;
   --border-subtle: #e2e8f0;
@@ -12,6 +17,10 @@
 }
 
 .dark {
+  --brand: #5981d6;
+  --brand-strong: #8ba9e6;
+  --brand-tint: #0a2160;
+
   --bg-primary: #0c1017;
   --bg-card: #121824;
   --border-subtle: #1e293b;
@@ -25,12 +34,12 @@ body {
   color: var(--text-primary);
   min-height: 100vh;
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-  background-image: radial-gradient(rgba(148, 163, 184, 0.15) 1px, transparent 1px);
+  background-image: radial-gradient(rgba(15, 59, 176, 0.12) 1px, transparent 1px);
   background-size: 24px 24px;
 }
 
 .dark body {
-  background-image: radial-gradient(rgba(255, 255, 255, 0.07) 1px, transparent 1px);
+  background-image: radial-gradient(rgba(137, 168, 230, 0.09) 1px, transparent 1px);
 }
 
 /* Custom cyber scrollbars */
@@ -53,7 +62,28 @@ body {
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #94a3b8;
+  background: var(--brand);
+}
+
+/* One consistent keyboard focus treatment, brand-coloured. */
+:where(a, button, input, textarea, select, [tabindex]):focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+::selection {
+  background: var(--brand);
+  color: #fff;
+}
+
+/* Respect reduced-motion for the pulse/ping/spin used across the pipeline UI. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }
 
 /* Print optimizations for Forensic Report Export */

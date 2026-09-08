@@ -14,6 +14,7 @@ import redis
 from pydantic import ValidationError
 
 from netra_common.config import settings
+from netra_common.events import PipelineEventPublisher, PipelineStage, StageTimer
 from netra_common.models.email import (
     AnalyzedEmail,
     ClassifiedEmail,
@@ -43,6 +44,7 @@ class ThreatEngineWorker:
             settings.redis_url,
             decode_responses=True,
         )
+        self.events = PipelineEventPublisher(self.redis_client)
 
         signal.signal(signal.SIGINT, self._handle_shutdown)
         signal.signal(signal.SIGTERM, self._handle_shutdown)
@@ -54,7 +56,9 @@ class ThreatEngineWorker:
     def classify_email(self, analyzed_email: AnalyzedEmail) -> ClassifiedEmail:
         """Run rule scoring algorithm and aggregate IOCs."""
         # 1. Evaluate Rule-Based Threat Score & Classification
-        risk_score, verdict, matched_rules = evaluate_threat_score(analyzed_email.analysis)
+        risk_score, verdict, matched_rules, contributions, raw_score = evaluate_threat_score(
+            analyzed_email.analysis
+        )
 
         # 2. Extract and Deduplicate IOCs
         iocs = extract_consolidated_iocs(analyzed_email.parsed_email, analyzed_email.analysis)
@@ -62,6 +66,8 @@ class ThreatEngineWorker:
         threat_assessment = ThreatIntelligence(
             risk_score=risk_score,
             classification=verdict,
+            rule_contributions=contributions,
+            score_before_clamp=raw_score,
             matched_rules=matched_rules,
             iocs=iocs,
             classified_at=datetime.utcnow(),
@@ -84,10 +90,14 @@ class ThreatEngineWorker:
 
         logger.info(f"Classifying threat for email {analyzed_email.email_id}...")
 
+        timer = StageTimer()
+
         try:
             classified = self.classify_email(analyzed_email)
         except Exception as e:
             logger.exception(f"Error classifying email {analyzed_email.email_id}: {e}")
+            self.events.emit(analyzed_email.email_id, PipelineStage.SCORED, status="failed",
+                             latency_ms=timer.elapsed_ms, error=f"Threat scoring failed: {e}")
             return
 
         # Push to threat_intel_queue
@@ -102,6 +112,13 @@ class ThreatEngineWorker:
                 f"IOCs={len(assessment.iocs)}, "
                 f"RulesTriggered={len(assessment.matched_rules)}. "
                 f"Dispatched to '{THREAT_INTEL_QUEUE}'."
+            )
+            self.events.emit(
+                classified.email_id,
+                PipelineStage.SCORED,
+                latency_ms=timer.elapsed_ms,
+                detail=f"{assessment.classification.value} at {assessment.risk_score}/100 "
+                       f"from {len(assessment.matched_rules)} matched rules, {len(assessment.iocs)} IOCs",
             )
         except Exception as e:
             logger.error(f"Failed to push classified email {classified.email_id} to Redis: {e}")

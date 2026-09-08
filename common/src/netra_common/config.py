@@ -65,5 +65,22 @@ class Settings(BaseSettings):
     QUARANTINE_BUCKET: str = Field(default="quarantine")
     REPORTS_BUCKET: str = Field(default="reports")
 
+    # ------------------------------------------------------------------
+    # Layer 5: External Threat Intelligence
+    # ------------------------------------------------------------------
+    # AbuseIPDB free tier allows 1,000 checks/day, so IP lookups are cached in Redis
+    # and private/reserved ranges are never sent upstream.
+    ABUSEIPDB_API_KEY: str = Field(default="", description="AbuseIPDB API key; live IP enrichment is disabled when empty")
+    ABUSEIPDB_ENABLED: bool = Field(default=True, description="Master switch for live IP enrichment")
+    ABUSEIPDB_TIMEOUT_SECONDS: float = Field(default=4.0, description="Per-request timeout for AbuseIPDB")
+    ABUSEIPDB_MAX_AGE_DAYS: int = Field(default=90, description="Report age window passed to AbuseIPDB")
+    ABUSEIPDB_MALICIOUS_THRESHOLD: int = Field(default=50, description="abuseConfidenceScore at or above which an IP is treated as malicious")
+    ABUSEIPDB_CACHE_TTL_SECONDS: int = Field(default=21600, description="Redis cache TTL for AbuseIPDB verdicts (6h) to conserve free-tier quota")
+
+    @property
+    def abuseipdb_active(self) -> bool:
+        """Live IP enrichment runs only when explicitly enabled and a key is present."""
+        return bool(self.ABUSEIPDB_ENABLED and self.ABUSEIPDB_API_KEY.strip())
+
 
 settings = Settings()

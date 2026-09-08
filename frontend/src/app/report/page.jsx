@@ -25,6 +25,8 @@ import {
 import { SAMPLE_CASE_0891, INVESTIGATION_ARCHIVE, CASES_MAP } from '@/lib/sampleData';
 import { fetchReportsList, fetchReportDetails } from '@/lib/api';
 import { transformBackendReport } from '@/lib/emlParser';
+import CampaignGraph from '@/components/CampaignGraph';
+import ScoreWaterfall from '@/components/ScoreWaterfall';
 
 export default function ReportPage() {
   const [currentCase, setCurrentCase] = useState(SAMPLE_CASE_0891);
@@ -85,18 +87,9 @@ export default function ReportPage() {
       }
     }
 
-    // 3. Fallback to newly analyzed session storage
-    const stored = sessionStorage.getItem('netra_current_report');
-    if (stored) {
-      try {
-        const parsed = JSON.parse(stored);
-        if (parsed && parsed.caseId) {
-          setCurrentCase(parsed);
-        }
-      } catch (err) {
-        console.error('Failed reading stored report in report page:', err);
-      }
-    }
+    // No client-side fallback: a forensic report is only ever rendered from a
+    // backend-scored record. If the gateway has nothing, the bundled sample case stands
+    // and is labelled as such rather than being passed off as an analysis result.
   }, []);
 
   const handleCopySha = () => {
@@ -301,6 +294,19 @@ export default function ReportPage() {
           </div>
         </div>
 
+      </div>
+
+      {/* Attack infrastructure graph + score explainability.
+          Together these answer the two questions a forensic report must: what else is
+          this connected to, and why did it score what it scored. */}
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-6 items-start">
+        <CampaignGraph emailId={currentCase.backendEmailId} />
+        <ScoreWaterfall
+          contributions={currentCase.ruleContributions}
+          finalScore={currentCase.riskScore}
+          rawScore={currentCase.scoreBeforeClamp}
+          verdict={currentCase.verdict}
+        />
       </div>
 
       {/* Relay Hop Traversal Analysis Section */}

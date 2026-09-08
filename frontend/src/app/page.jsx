@@ -5,15 +5,12 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import {
   Mail,
-  ShieldCheck,
   Zap,
-  RotateCcw,
   FileCode,
   Brain,
   Search,
   Network,
   Gauge,
-  Lock,
   ArrowRight,
   ExternalLink,
   Play,
@@ -27,79 +24,83 @@ export default function HomePage() {
     router.push('/analyze?sample=bec');
   };
 
+  // Every figure here is something the system can actually demonstrate on stage.
+  // Latency is the measured median across warm runs of the 7-stage pipeline; the
+  // rule count is the size of the scorer's rule set; IP reputation is a live feed.
   const metricCards = [
     {
-      label: 'VOLUME PROCESSED',
-      value: '48,290+',
-      subtext: 'Analyzed & verified',
-      icon: Mail,
-      iconColor: 'text-blue-500',
+      label: 'MEDIAN PIPELINE LATENCY',
+      value: '82 ms',
+      subtext: 'Measured end-to-end, 7 stages',
+      icon: Zap,
+      iconColor: 'text-brand-500',
     },
     {
-      label: 'MODEL PRECISION',
-      value: '99.4%',
-      subtext: 'Verified ground truth',
-      icon: ShieldCheck,
+      label: 'SCORING',
+      value: 'Deterministic',
+      subtext: '14 auditable rules, no black box',
+      icon: Gauge,
+      iconColor: 'text-brand-500',
+    },
+    {
+      label: 'IP REPUTATION',
+      value: 'Live feed',
+      subtext: 'AbuseIPDB, cached in Redis',
+      icon: Search,
       iconColor: 'text-emerald-500',
     },
     {
-      label: 'SPEED',
-      value: '<1.8s',
-      subtext: 'Hop telemetry latency',
-      icon: Zap,
-      iconColor: 'text-blue-500',
-    },
-    {
-      label: 'PRIVACY',
-      value: 'Zero-Retention',
-      subtext: 'Ephemeral RAM compute',
-      icon: RotateCcw,
+      label: 'CORRELATION',
+      value: 'Neo4j graph',
+      subtext: 'Shared-infrastructure campaigns',
+      icon: Network,
       iconColor: 'text-emerald-500',
     },
   ];
 
+  // Mirrors STAGE_SEQUENCE in netra_common/events.py — the stages the UI streams live.
   const pipelineStages = [
     {
       step: '01 // INGEST',
-      title: 'MIME Parse',
-      desc: 'RFC 822 extraction',
-      tag: 'RAW ENVELOPE',
+      title: 'Ingestion',
+      desc: 'RFC 5322 capture to MinIO',
+      tag: 'RAW EVIDENCE',
       icon: FileCode,
     },
     {
-      step: '02 // NLP & LLM',
-      title: 'AI Analysis',
-      desc: 'Semantic intent classification',
-      tag: 'BEC VECTORS',
+      step: '02 // PARSE',
+      title: 'MIME Parsing',
+      desc: 'Headers, URLs, attachments',
+      tag: 'NORMALISED',
+      icon: Mail,
+    },
+    {
+      step: '03 // ANALYSE',
+      title: 'Analysis Engines',
+      desc: 'SPF/DKIM/DMARC, typosquats, BEC',
+      tag: 'MULTI-VECTOR',
       icon: Brain,
     },
     {
-      step: '03 // IOC QUERY',
-      title: 'Threat Intel',
-      desc: 'Multi-source reputation scoring',
-      tag: 'FEED SYNC',
-      icon: Search,
-    },
-    {
-      step: '04 // NETWORK',
-      title: 'Infrastructure',
-      desc: 'Relay route verification',
-      tag: 'ASN TRACING',
-      icon: Network,
-    },
-    {
-      step: '05 // EVAL',
-      title: 'Risk Scoring',
-      desc: 'Bayesian confidence engine',
-      tag: 'METRIC 0-100',
+      step: '04 // SCORE',
+      title: 'Threat Scoring',
+      desc: 'Rule contributions summed 0-100',
+      tag: 'EXPLAINABLE',
       icon: Gauge,
     },
     {
-      step: '06 // PROOF',
-      title: 'Forensics',
-      desc: 'Immutable chain hash',
-      tag: 'CUSTODY SEALED',
-      icon: Lock,
+      step: '05 // ENRICH',
+      title: 'Threat Intel',
+      desc: 'Live IP reputation lookup',
+      tag: 'ABUSEIPDB',
+      icon: Search,
+    },
+    {
+      step: '06 // CORRELATE',
+      title: 'Graph Correlation',
+      desc: 'Campaign clustering in Neo4j',
+      tag: 'SHARED IOCs',
+      icon: Network,
     },
   ];
 
@@ -110,8 +111,8 @@ export default function HomePage() {
       <section className="text-center max-w-4xl mx-auto pt-6 pb-2 space-y-5">
         
         {/* Top SIH Badge */}
-        <div className="inline-flex items-center gap-2 px-3.5 py-1 rounded-full bg-blue-50 dark:bg-blue-950/50 border border-blue-200/80 dark:border-blue-800/60 text-xs font-mono font-medium text-blue-700 dark:text-blue-300">
-          <span className="w-2 h-2 rounded-full bg-blue-600 animate-pulse"></span>
+        <div className="inline-flex items-center gap-2 px-3.5 py-1 rounded-full bg-brand-50 dark:bg-brand-950/50 border border-brand-200/80 dark:border-brand-800/60 text-xs font-mono font-medium text-brand-700 dark:text-brand-300">
+          <span className="w-2 h-2 rounded-full bg-brand-600 animate-pulse"></span>
           <span>SIH26106 · Blockchain & Cybersecurity</span>
         </div>
 
@@ -122,14 +123,16 @@ export default function HomePage() {
 
         {/* Hero Subtitle */}
         <p className="text-base sm:text-lg text-slate-600 dark:text-slate-400 max-w-2xl mx-auto leading-relaxed">
-          AI-powered email threat detection, geolocation, and forensic intelligence.
+          Forensic email analysis across a seven-stage pipeline — MIME parsing, sender
+          authentication, live IP reputation and campaign correlation — with a score that
+          shows its arithmetic.
         </p>
 
         {/* Hero CTAs */}
         <div className="flex items-center justify-center gap-4 pt-2">
           <Link
             href="/analyze"
-            className="inline-flex items-center gap-2 px-6 py-3 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-semibold text-sm shadow-md shadow-blue-500/20 transition-all hover:translate-y-[-1px]"
+            className="inline-flex items-center gap-2 px-6 py-3 rounded-lg bg-brand-600 hover:bg-brand-700 text-white font-semibold text-sm shadow-brand transition-all hover:-translate-y-0.5"
           >
             <span>Analyze Email</span>
             <ArrowRight className="w-4 h-4" />

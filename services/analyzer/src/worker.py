@@ -14,6 +14,7 @@ import redis
 from pydantic import ValidationError
 
 from netra_common.config import settings
+from netra_common.events import PipelineEventPublisher, PipelineStage, StageTimer
 from netra_common.models.email import (
     ParsedEmail,
     AnalyzedEmail,
@@ -47,6 +48,7 @@ class EmailAnalyzerWorker:
             settings.redis_url,
             decode_responses=True,
         )
+        self.events = PipelineEventPublisher(self.redis_client)
 
         # Setup graceful shutdown handlers
         signal.signal(signal.SIGINT, self._handle_shutdown)
@@ -100,10 +102,14 @@ class EmailAnalyzerWorker:
 
         logger.info(f"Running Layer 3 security analysis on email {parsed_email.email_id}...")
 
+        timer = StageTimer()
+
         try:
             analyzed = self.analyze_email(parsed_email)
         except Exception as e:
             logger.exception(f"Error during analysis of email {parsed_email.email_id}: {e}")
+            self.events.emit(parsed_email.email_id, PipelineStage.ANALYZED, status="failed",
+                             latency_ms=timer.elapsed_ms, error=f"Analysis engines failed: {e}")
             return
 
         # Push to threat_engine_queue
@@ -118,8 +124,18 @@ class EmailAnalyzerWorker:
                 f"ExecAttachments={analyzed.analysis.attachment_analysis.has_executable_attachment}. "
                 f"Dispatched to '{THREAT_ENGINE_QUEUE}'."
             )
+            self.events.emit(
+                analyzed.email_id,
+                PipelineStage.ANALYZED,
+                latency_ms=timer.elapsed_ms,
+                detail=f"SPF={analyzed.analysis.header_analysis.spf_verdict}, "
+                       f"DMARC={analyzed.analysis.header_analysis.dmarc_verdict}, "
+                       f"{len(analyzed.analysis.url_analysis.typosquat_detections)} typosquat hits",
+            )
         except Exception as e:
             logger.error(f"Failed to push analyzed email {analyzed.email_id} to Redis: {e}")
+            self.events.emit(analyzed.email_id, PipelineStage.ANALYZED, status="failed",
+                             latency_ms=timer.elapsed_ms, error=f"Queue dispatch failed: {e}")
 
     def run(self):
         """Worker main loop polling Redis with blocking pop."""

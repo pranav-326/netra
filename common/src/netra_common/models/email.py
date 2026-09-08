@@ -151,11 +151,27 @@ class IOCItem(BaseModel):
     context: str = Field(default="", description="Contextual description of where/why this IOC was found")
 
 
+class RuleContribution(BaseModel):
+    """One scoring rule that fired, and exactly what it contributed to the risk score.
+
+    This is Netra's explainability primitive. The score is a plain sum of these
+    contributions, so a report can show precisely how it reached its number —
+    deterministic and auditable, with no model attribution step to approximate.
+    """
+    rule_id: str = Field(..., description="Stable identifier for the rule, e.g. 'ATT-EXEC'")
+    category: str = Field(..., description="Vector this rule belongs to: attachment, url, content, header")
+    label: str = Field(..., description="Short human-readable name of what fired")
+    points: int = Field(..., description="Points this rule added to the risk score")
+    evidence: str = Field(default="", description="The concrete observation that triggered the rule")
+
+
 class ThreatIntelligence(BaseModel):
     """Threat scoring, classification verdict, triggered rules, and consolidated IOCs."""
     risk_score: int = Field(..., ge=0, le=100, description="Overall risk score from 0 (harmless) to 100 (critical)")
     classification: ThreatVerdict = Field(..., description="Threat classification verdict")
-    matched_rules: List[str] = Field(default_factory=list, description="List of triggered scoring rules with rationale and weights")
+    rule_contributions: List[RuleContribution] = Field(default_factory=list, description="Structured per-rule score contributions backing the risk score")
+    score_before_clamp: int = Field(default=0, description="Raw sum of contributions before clamping to [0, 100]")
+    matched_rules: List[str] = Field(default_factory=list, description="Human-readable rendering of rule_contributions, retained for compatibility")
     iocs: List[IOCItem] = Field(default_factory=list, description="Consolidated indicators of compromise for Layer 5 enrichment")
     classified_at: datetime = Field(default_factory=datetime.utcnow, description="UTC timestamp of threat classification")
 

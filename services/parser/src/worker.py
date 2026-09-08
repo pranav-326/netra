@@ -20,6 +20,7 @@ import redis
 from pydantic import ValidationError
 
 from netra_common.config import settings
+from netra_common.events import PipelineEventPublisher, PipelineStage, StageTimer
 from netra_common.models.email import (
     IngestionEvent,
     ParsedEmail,
@@ -56,6 +57,7 @@ class EmailParserWorker:
             settings.redis_url,
             decode_responses=True,
         )
+        self.events = PipelineEventPublisher(self.redis_client)
 
         # MinIO client
         self.minio_client = MinioStorageClient(
@@ -244,6 +246,8 @@ class EmailParserWorker:
 
         logger.info(f"Processing email: id={event.email_id}, key={event.object_key}")
 
+        timer = StageTimer()
+
         # Fetch raw email bytes from MinIO
         try:
             raw_bytes = self.minio_client.get_bytes(
@@ -252,6 +256,8 @@ class EmailParserWorker:
             )
         except Exception as e:
             logger.error(f"Failed to fetch {event.object_key} from MinIO bucket {event.bucket}: {e}")
+            self.events.emit(event.email_id, PipelineStage.PARSED, status="failed",
+                             latency_ms=timer.elapsed_ms, error=f"Object storage fetch failed: {e}")
             return
 
         # Parse email
@@ -264,6 +270,8 @@ class EmailParserWorker:
             )
         except Exception as e:
             logger.exception(f"Unexpected error while parsing email {event.email_id}: {e}")
+            self.events.emit(event.email_id, PipelineStage.PARSED, status="failed",
+                             latency_ms=timer.elapsed_ms, error=f"MIME parse failed: {e}")
             return
 
         # Push normalized ParsedEmail to Layer 3 queue
@@ -276,8 +284,17 @@ class EmailParserWorker:
                 f"urls={len(parsed.extracted_urls)}, "
                 f"attachments={len(parsed.attachments)}. Pushed to {PARSED_QUEUE}."
             )
+            self.events.emit(
+                event.email_id,
+                PipelineStage.PARSED,
+                latency_ms=timer.elapsed_ms,
+                detail=f"{len(parsed.extracted_urls)} URLs, {len(parsed.attachments)} attachments, "
+                       f"{len(parsed.headers.received_chain or [])} relay hops extracted",
+            )
         except Exception as e:
             logger.error(f"Failed pushing parsed email {event.email_id} to Redis: {e}")
+            self.events.emit(event.email_id, PipelineStage.PARSED, status="failed",
+                             latency_ms=timer.elapsed_ms, error=f"Queue dispatch failed: {e}")
 
     def run(self):
         """Worker main loop polling Redis via blocking pop (BRPOP)."""
