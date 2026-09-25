@@ -44,8 +44,12 @@ def _build_parser():
     return EmailParserWorker(connect=False)
 
 
-def analyze_raw_email(parser, raw_bytes: bytes, email_id: str) -> AnalyzedEmail:
-    """Run the production Layer 2 and Layer 3 path over one raw message."""
+def analyze_raw_email(parser, raw_bytes: bytes, email_id: str, resolver=None) -> AnalyzedEmail:
+    """Run the production Layer 2 and Layer 3 path over one raw message.
+
+    Link shorteners are not resolved by default: corpus work is offline, and years-old
+    short links are dead anyway. Pass a ShortenerResolver to opt in.
+    """
     parsed = parser.parse_rfc5322(
         raw_bytes=raw_bytes,
         email_id=email_id,
@@ -55,7 +59,7 @@ def analyze_raw_email(parser, raw_bytes: bytes, email_id: str) -> AnalyzedEmail:
 
     analysis = AnalysisResults(
         header_analysis=analyze_headers(parsed.headers),
-        url_analysis=analyze_urls(parsed.extracted_urls),
+        url_analysis=analyze_urls(parsed.extracted_urls, resolver=resolver),
         content_analysis=analyze_content(parsed.body_plain, parsed.body_html, parsed.headers.subject),
         attachment_analysis=analyze_attachments(parsed.attachments),
     )

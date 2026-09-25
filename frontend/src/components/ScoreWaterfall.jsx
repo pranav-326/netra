@@ -30,7 +30,13 @@ const FALLBACK_STYLE = {
   label: 'Other',
 };
 
-const styleFor = (category) => CATEGORY_STYLE[category] || FALLBACK_STYLE;
+// Both learned models share the "ml" category; the text model gets its own colour so an
+// analyst can tell which model moved the score.
+const RULE_STYLE = {
+  'ML-TEXT': { bar: 'bg-teal-500', dot: 'bg-teal-500', text: 'text-teal-600 dark:text-teal-400', label: 'Learned text model' },
+};
+
+const styleFor = (step) => RULE_STYLE[step.rule_id] || CATEGORY_STYLE[step.category] || FALLBACK_STYLE;
 
 // Verdict boundaries, mirroring MALICIOUS_THRESHOLD / SUSPICIOUS_THRESHOLD in scorer.py.
 const SUSPICIOUS_AT = 21;
@@ -80,7 +86,7 @@ export default function ScoreWaterfall({ contributions = [], finalScore = 0, raw
             </h3>
           </div>
           <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
-            {ruleCount} rule{ruleCount === 1 ? '' : 's'} fired{mlCount ? ' + learned model' : ''} · deterministic and auditable by design
+            {ruleCount} rule{ruleCount === 1 ? '' : 's'} fired{mlCount ? ` + ${mlCount === 1 ? 'learned model' : `${mlCount} learned models`}` : ''} · deterministic and auditable by design
           </p>
         </div>
         <div className="text-right shrink-0">
@@ -100,7 +106,7 @@ export default function ScoreWaterfall({ contributions = [], finalScore = 0, raw
         {/* Waterfall rows: each bar starts where the previous one ended. */}
         <div className="space-y-2.5">
           {steps.map((step) => {
-            const style = styleFor(step.category);
+            const style = styleFor(step);
             // A negative contribution (only the model can produce one) draws backwards
             // from the running total rather than off the left edge of the track.
             const barStart = Math.min(step.start, step.end);
@@ -196,11 +202,11 @@ export default function ScoreWaterfall({ contributions = [], finalScore = 0, raw
           </div>
         </div>
 
-        {steps.some((step) => step.category === 'ml') && (
+        {mlCount > 0 && (
           <div className="text-[11px] text-violet-700 dark:text-violet-300 bg-violet-50 dark:bg-violet-950/30 border border-violet-200 dark:border-violet-900/50 rounded-lg p-2.5">
-            One bar comes from the learned classifier. It is capped and additive — a second
-            opinion, never an override — and decomposes into the same kind of per-feature
-            terms as every rule above.
+            {mlCount === 1 ? 'One bar comes from a learned classifier.' : `${mlCount} bars come from learned classifiers: one reads the message's structure, one reads its words.`}{' '}
+            Each is capped and additive — a second opinion, never an override — and decomposes
+            into per-feature or per-word terms, like every rule above.
           </div>
         )}
 

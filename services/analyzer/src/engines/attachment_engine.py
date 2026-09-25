@@ -16,6 +16,10 @@ DANGEROUS_EXTENSIONS = {
     ".xltm", ".chm", ".lnk", ".inf", ".pif", ".vb"
 }
 
+# Attached web pages: open locally in a browser, render a fake login form, and post
+# credentials to the attacker, with no link for a URL filter to inspect.
+HTML_EXTENSIONS = {".html", ".htm", ".shtml", ".xhtml", ".mht", ".mhtml", ".svg"}
+
 # Regex pattern to catch double extensions commonly used to trick users (e.g. invoice.pdf.exe)
 DOUBLE_EXTENSION_PATTERN = re.compile(
     r"\.(?:pdf|docx?|xlsx?|pptx?|jpe?g|png|txt|zip|tar|gz)\.(?:exe|scr|vbs|js|bat|cmd|ps1|hta|iso|jar|msi|cpl)$",
@@ -54,6 +58,7 @@ def analyze_attachments(attachments: List[AttachmentMetadata]) -> AttachmentAnal
     has_double_ext = False
     has_mime_mismatch = False
     flagged: List[FlaggedAttachment] = []
+    html_files: List[str] = []
 
     for att in attachments:
         filename = att.filename or "unnamed"
@@ -61,6 +66,11 @@ def analyze_attachments(attachments: List[AttachmentMetadata]) -> AttachmentAnal
 
         # Extract extension
         _, ext = os.path.splitext(filename.lower())
+
+        # Kept apart from flagged_attachments: an HTML file is a delivery vector for a fake
+        # login page, not an executable, and the learned model's inputs stay unchanged.
+        if ext in HTML_EXTENSIONS:
+            html_files.append(filename)
 
         # 1. Dangerous / Executable Extension Check
         if ext in DANGEROUS_EXTENSIONS:
@@ -120,4 +130,5 @@ def analyze_attachments(attachments: List[AttachmentMetadata]) -> AttachmentAnal
         has_double_extension=has_double_ext,
         has_mime_mismatch=has_mime_mismatch,
         flagged_attachments=flagged,
+        html_attachments=html_files,
     )

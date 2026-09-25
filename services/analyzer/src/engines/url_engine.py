@@ -8,27 +8,24 @@ import ipaddress
 from urllib.parse import urlparse
 from typing import List, Set, Optional, Tuple
 
-from netra_common.models.email import UrlAnalysisResult, DetectedTyposquat
+from netra_common.models.email import UrlAnalysisResult, DetectedTyposquat, ShortenedUrl
 
-# Hardcoded high-value target brand domains frequently targeted in phishing
-HIGH_VALUE_TARGETS = [
-    "microsoft.com",
-    "google.com",
-    "paypal.com",
-    "apple.com",
-    "amazon.com",
-    "netflix.com",
-    "chase.com",
-    "bankofamerica.com",
-    "wellsfargo.com",
-    "dropbox.com",
-    "office.com",
-    "adobe.com",
-    "dhl.com",
-    "fedex.com",
-    "facebook.com",
-    "instagram.com",
-]
+from .brands import (
+    ALL_LEGITIMATE_DOMAINS,
+    FUZZY_BRAND_TOKENS,
+    HOSTNAME_BRAND_TOKENS,
+    TYPOSQUAT_TARGETS,
+    hostname_tokens,
+)
+from .shortener import DEFAULT_RESOLVER, ShortenerResolver, is_shortener
+
+# Free, anonymous hosting where phishing pages are routinely published: IPFS gateways
+# and throwaway app-hosting domains. Legitimate business mail rarely links to these.
+ABUSED_HOSTING_SUFFIXES = (
+    "ipfs.io", "cloudflare-ipfs.com", "dweb.link", "w3s.link", "nftstorage.link", "pinata.cloud",
+    "r2.dev", "workers.dev", "pages.dev", "web.app", "firebaseapp.com", "glitch.me",
+    "ngrok.io", "ngrok-free.app", "trycloudflare.com",
+)
 
 IP_PATTERN = re.compile(r"^(?:\d{1,3}\.){3}\d{1,3}$")
 
@@ -76,8 +73,14 @@ def extract_root_domain(hostname: str) -> str:
     return hostname.lower()
 
 
-def analyze_urls(urls: List[str]) -> UrlAnalysisResult:
-    """Analyze extracted URLs for typosquatting, bare IP addresses, and evasion tactics."""
+def analyze_urls(
+    urls: List[str], resolver: Optional[ShortenerResolver] = DEFAULT_RESOLVER
+) -> UrlAnalysisResult:
+    """Analyze extracted URLs for typosquatting, bare IP addresses, and evasion tactics.
+
+    Short links are resolved through `resolver` and their destinations are analysed
+    like any other link. Pass `resolver=None` to skip network resolution entirely.
+    """
     if not urls:
         return UrlAnalysisResult()
 
@@ -86,10 +89,15 @@ def analyze_urls(urls: List[str]) -> UrlAnalysisResult:
     ip_host_urls: List[str] = []
     defanged_urls: List[str] = []
     suspicious_flags: List[str] = []
+    shortened: List[ShortenedUrl] = []
+    abused_hosting: List[str] = []
 
     seen_typosquat_keys = set()
 
-    for raw_url in urls:
+    # Resolved destinations are appended while iterating, so they run through the
+    # same checks below as the links that were in the email.
+    work_list = list(urls)
+    for raw_url in work_list:
         # Check if originally defanged
         if "hxxp" in raw_url.lower() or "[.]" in raw_url:
             defanged_urls.append(raw_url)
@@ -105,6 +113,20 @@ def analyze_urls(urls: List[str]) -> UrlAnalysisResult:
         if not hostname:
             continue
 
+        # 0. Link shortener: find the real destination and queue it for analysis.
+        if resolver is not None and is_shortener(hostname):
+            root_domains.add(extract_root_domain(hostname))
+            resolution = resolver.resolve(normalized_url)
+            resolution.original_url = raw_url
+            shortened.append(resolution)
+            if resolution.final_url:
+                work_list.append(resolution.final_url)
+            continue
+
+        # Phishing pages hosted where anyone can publish anonymously for free.
+        if _is_abused_hosting(hostname, normalized_url):
+            abused_hosting.append(raw_url)
+
         # 1. Bare IP address check
         if IP_PATTERN.match(hostname):
             ip_host_urls.append(raw_url)
@@ -119,55 +141,23 @@ def analyze_urls(urls: List[str]) -> UrlAnalysisResult:
         if root_domain:
             root_domains.add(root_domain)
 
-        # 3. Typosquatting / Brand Impersonation Checks
-        for target in HIGH_VALUE_TARGETS:
-            target_brand_name = target.split(".")[0]
-
-            # Direct match - legit domain, skip typosquat check
-            if root_domain == target:
-                continue
-
-            # Subdomain spoofing (e.g. paypal.com.evil-portal.net or paypal-login.net)
-            if target_brand_name in hostname.lower() and root_domain != target:
+        # 3. Typosquatting / brand impersonation. A domain a brand legitimately owns is
+        #    never flagged as imitating any brand.
+        if root_domain and root_domain not in ALL_LEGITIMATE_DOMAINS:
+            for target, dist, ratio, flag in _brand_impersonations(hostname, root_domain):
                 key = (root_domain, target)
-                if key not in seen_typosquat_keys:
-                    seen_typosquat_keys.add(key)
-                    suspicious_flags.append(
-                        f"Brand name '{target_brand_name}' embedded in suspicious domain '{hostname}'"
+                if key in seen_typosquat_keys:
+                    continue
+                seen_typosquat_keys.add(key)
+                suspicious_flags.append(flag)
+                typosquats.append(
+                    DetectedTyposquat(
+                        extracted_domain=root_domain,
+                        target_brand=target,
+                        distance=dist,
+                        similarity_ratio=round(ratio, 3),
                     )
-                    typosquats.append(
-                        DetectedTyposquat(
-                            extracted_domain=root_domain,
-                            target_brand=target,
-                            distance=1,
-                            similarity_ratio=0.9,
-                        )
-                    )
-                continue
-
-            # Levenshtein distance check on root domain (e.g., paypa1.com vs paypal.com)
-            # Only compare if domain lengths are reasonably close
-            if abs(len(root_domain) - len(target)) <= 3:
-                dist = levenshtein_distance(root_domain, target)
-                max_len = max(len(root_domain), len(target))
-                ratio = 1.0 - (dist / max_len)
-
-                # Flag if edit distance is 1 or 2 with high similarity
-                if 1 <= dist <= 2 and ratio >= 0.75:
-                    key = (root_domain, target)
-                    if key not in seen_typosquat_keys:
-                        seen_typosquat_keys.add(key)
-                        typosquats.append(
-                            DetectedTyposquat(
-                                extracted_domain=root_domain,
-                                target_brand=target,
-                                distance=dist,
-                                similarity_ratio=round(ratio, 3),
-                            )
-                        )
-                        suspicious_flags.append(
-                            f"Typosquatting detected: '{root_domain}' mimics high-value target '{target}' (edit distance: {dist})"
-                        )
+                )
 
         # 4. Excessive subdomains check (e.g. a.b.c.d.e.example.com)
         subdomains = hostname.split(".")
@@ -181,4 +171,41 @@ def analyze_urls(urls: List[str]) -> UrlAnalysisResult:
         ip_host_urls=ip_host_urls,
         defanged_urls=defanged_urls,
         suspicious_url_flags=suspicious_flags,
+        shortened_urls=shortened,
+        abused_hosting_urls=abused_hosting,
     )
+
+
+def _brand_impersonations(hostname: str, root_domain: str) -> List[Tuple[str, int, float, str]]:
+    """(target domain, edit distance, similarity, flag text) for every brand imitated."""
+    hits = []
+    for token in hostname_tokens(hostname):
+        # Brand word as its own label or hyphenated part: paypal-login.net, docusign.secure.net
+        target = HOSTNAME_BRAND_TOKENS.get(token)
+        if target:
+            hits.append((target, 1, 0.9, f"Brand name '{token}' embedded in suspicious domain '{hostname}'"))
+            continue
+        # One character off a long brand word: micros0ft-portal.com, dropb0x-share.net
+        for brand_token, brand_target in FUZZY_BRAND_TOKENS.items():
+            if abs(len(token) - len(brand_token)) <= 1 and levenshtein_distance(token, brand_token) == 1:
+                hits.append((brand_target, 1, 1 - 1 / len(brand_token),
+                             f"Lookalike of brand '{brand_token}' ('{token}') in domain '{hostname}'"))
+
+    # Whole-domain edit distance: paypa1.com vs paypal.com
+    for _, target in TYPOSQUAT_TARGETS:
+        if abs(len(root_domain) - len(target)) > 3:
+            continue
+        dist = levenshtein_distance(root_domain, target)
+        ratio = 1.0 - dist / max(len(root_domain), len(target))
+        if 1 <= dist <= 2 and ratio >= 0.75:
+            hits.append((target, dist, ratio,
+                         f"Typosquatting detected: '{root_domain}' mimics high-value target '{target}' (edit distance: {dist})"))
+    return hits
+
+
+def _is_abused_hosting(hostname: str, url: str) -> bool:
+    host = hostname.lower()
+    if any(host == s or host.endswith("." + s) for s in ABUSED_HOSTING_SUFFIXES):
+        return True
+    # IPFS content served through any gateway: https://gateway.example/ipfs/<cid>
+    return "/ipfs/" in url.lower() or ".ipfs." in host

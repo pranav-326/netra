@@ -19,6 +19,18 @@ from netra_common.models.email import AnalysisResults, RuleContribution, ThreatV
 MALICIOUS_THRESHOLD = 61
 SUSPICIOUS_THRESHOLD = 21
 
+# Modern lure type (content_engine.LURE_PATTERNS) -> (rule id, label, points). Points
+# reflect how often legitimate mail says the same thing: real file-sharing and delivery
+# notices exist, a phone number to call about a "Geek Squad renewal" essentially doesn't.
+LURE_RULES = {
+    "callback_scam": ("CNT-LURE-CALLBACK", "Callback scam: brand, phone number and payment", 25),
+    "mailbox_admin": ("CNT-LURE-MAILBOX", "Fake mailbox or account-admin notice", 20),
+    "document_share": ("CNT-LURE-DOCUMENT", "Shared-document or e-signature lure", 15),
+    "parcel_delivery": ("CNT-LURE-DELIVERY", "Parcel delivery lure", 10),
+    "subscription_renewal": ("CNT-LURE-RENEWAL", "Subscription renewal bait", 10),
+    "crypto": ("CNT-LURE-CRYPTO", "Cryptocurrency bait", 10),
+}
+
 # Rules founded on an objective property of the message rather than an interpretation
 # of its language. An executable attachment either is or is not present; a URL either
 # does or does not point at a bare IP. No probability should be able to argue these
@@ -86,6 +98,15 @@ def evaluate_threat_score(
             " and ".join(which),
         )
 
+    if att_res.html_attachments:
+        fire(
+            "ATT-HTML",
+            "attachment",
+            "HTML file attached (fake login page vector)",
+            25,
+            ", ".join(att_res.html_attachments[:3]),
+        )
+
     # --------------------------------------------------------------------------
     # 2. URL & Domain Typosquatting Checks (+70 max)
     # --------------------------------------------------------------------------
@@ -116,6 +137,33 @@ def evaluate_threat_score(
             "Defanged URL evasion pattern",
             10,
             f"{len(url_res.defanged_urls)} defanged URL(s)",
+        )
+
+    # Deliberately small: legitimate marketing mail uses shorteners too. The real
+    # weight lands on the destination, which the rules above have already analysed.
+    if url_res.shortened_urls:
+        hops = []
+        for s in url_res.shortened_urls[:3]:
+            if s.resolved:
+                path = [s.original_url] + s.chain[1:-1] + [s.final_url]
+            else:
+                path = [s.original_url] + s.chain[1:] + [f"unresolved ({s.failure_reason})"]
+            hops.append(" -> ".join(path))
+        fire(
+            "URL-SHORTENER",
+            "url",
+            "Link shortener hides the real destination",
+            5,
+            "; ".join(hops),
+        )
+
+    if url_res.abused_hosting_urls:
+        fire(
+            "URL-ABUSED-HOST",
+            "url",
+            "Link hosted on IPFS or throwaway app hosting",
+            15,
+            f"{len(url_res.abused_hosting_urls)} URL(s): {', '.join(url_res.abused_hosting_urls[:2])}",
         )
 
     # --------------------------------------------------------------------------
@@ -159,6 +207,11 @@ def evaluate_threat_score(
             20,
             "urgent financial request: CNT-BEC-FINANCIAL and CNT-URGENCY both fired",
         )
+
+    for lure, matched in sorted(content_res.lure_matches.items()):
+        rule = LURE_RULES.get(lure)
+        if rule:
+            fire(rule[0], "content", rule[1], rule[2], f'matched "{matched}"')
 
     # --------------------------------------------------------------------------
     # 4. Header & Authentication Validation (+20 max)
@@ -205,6 +258,17 @@ def evaluate_threat_score(
             "receiving MTA recorded no authentication verdict",
         )
 
+    # Independent of authentication: modern phishing usually passes SPF from a domain
+    # the attacker owns, so a passing check says nothing about who the sender claims to be.
+    if header_res.impersonated_brand:
+        fire(
+            "HDR-BRAND-SPOOF",
+            "header",
+            "Sender name impersonates a brand",
+            25,
+            f"display name claims {header_res.impersonated_brand} but mail comes from {header_res.sender_domain}",
+        )
+
     raw_score = sum(c.points for c in contributions)
     final_score = max(0, min(raw_score, 100))
 
@@ -223,6 +287,14 @@ def evaluate_threat_score(
     ]
 
     return final_score, verdict, matched_rules, contributions, raw_score
+
+
+def _floor_against_hard_evidence(
+    contributions: List[RuleContribution], points: int
+) -> Tuple[int, List[str]]:
+    """A learned model may never talk down hard evidence (see HARD_EVIDENCE_RULES)."""
+    hard = sorted({c.rule_id for c in contributions} & HARD_EVIDENCE_RULES)
+    return (0 if points < 0 and hard else points), hard
 
 
 def apply_ml_contribution(
@@ -247,14 +319,8 @@ def apply_ml_contribution(
     if prediction is None or prediction.points == 0:
         return contributions
 
-    points = prediction.points
-
-    # The model may never talk down hard evidence (see HARD_EVIDENCE_RULES).
-    hard = sorted({c.rule_id for c in contributions} & HARD_EVIDENCE_RULES)
-    floored = False
-    if points < 0 and hard:
-        points = 0
-        floored = True
+    points, hard = _floor_against_hard_evidence(contributions, prediction.points)
+    floored = points != prediction.points
 
     drivers = prediction.top_drivers(3, positive_only=prediction.points > 0)
     if drivers:
@@ -280,6 +346,44 @@ def apply_ml_contribution(
             rule_id="ML-PHISH",
             category="ml",
             label="Learned phishing classifier",
+            points=points,
+            evidence=evidence,
+        )
+    ]
+
+
+def apply_text_contribution(
+    contributions: List[RuleContribution],
+    prediction,
+) -> List[RuleContribution]:
+    """Append the learned text model's contribution (ML-TEXT).
+
+    Same contract as apply_ml_contribution: one capped, signed bar whose evidence names
+    the words that moved it, floored at zero against hard evidence, and nothing at all
+    when the model is unavailable.
+    """
+    if prediction is None or prediction.points == 0:
+        return contributions
+
+    points, hard = _floor_against_hard_evidence(contributions, prediction.points)
+
+    terms = prediction.top_terms(4, positive=prediction.points > 0)
+    term_text = ", ".join(f"'{t}' ({c:+.2f})" for t, c in terms) or "no single dominant term"
+    evidence = (
+        f"p(phishing)={prediction.probability:.3f} vs threshold {prediction.threshold:.3f}; "
+        f"top terms: {term_text}; model {prediction.model_version}"
+    )
+    if points != prediction.points:
+        evidence = (
+            f"model suggested {prediction.points:+d} pts but was floored to 0: "
+            f"hard evidence present ({', '.join(hard)}). " + evidence
+        )
+
+    return contributions + [
+        RuleContribution(
+            rule_id="ML-TEXT",
+            category="ml",
+            label="Learned text classifier",
             points=points,
             evidence=evidence,
         )

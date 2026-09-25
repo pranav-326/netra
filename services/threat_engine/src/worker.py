@@ -21,7 +21,13 @@ from netra_common.models.email import (
     ThreatIntelligence,
 )
 from src.ml_scorer import get_scorer
-from src.scorer import apply_ml_contribution, evaluate_threat_score, finalize_score
+from src.scorer import (
+    apply_ml_contribution,
+    apply_text_contribution,
+    evaluate_threat_score,
+    finalize_score,
+)
+from src.text_scorer import get_text_scorer
 from src.ioc_extractor import extract_consolidated_iocs
 
 logging.basicConfig(
@@ -48,6 +54,7 @@ class ThreatEngineWorker:
         self.events = PipelineEventPublisher(self.redis_client)
         # Learned scoring layer. Absent artifact => rules-only, logged once at start.
         self.ml = get_scorer()
+        self.text = get_text_scorer()
 
         signal.signal(signal.SIGINT, self._handle_shutdown)
         signal.signal(signal.SIGTERM, self._handle_shutdown)
@@ -64,6 +71,9 @@ class ThreatEngineWorker:
         # 2. Learned layer, appended as one more contribution. Returns the rule
         #    contributions untouched when no model is loaded or inference fails.
         contributions = apply_ml_contribution(contributions, self.ml.predict(analyzed_email))
+        contributions = apply_text_contribution(
+            contributions, self.text.predict(analyzed_email.parsed_email)
+        )
 
         # 3. Collapse to the final score and verdict in one shared place.
         risk_score, verdict, matched_rules, raw_score = finalize_score(contributions)

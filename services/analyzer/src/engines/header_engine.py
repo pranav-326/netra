@@ -5,8 +5,12 @@ and validate SPF, DKIM, and DMARC verdicts, identifying anomalies or spoofing in
 
 import re
 import logging
-from typing import List, Dict, Any, Tuple
+from email.utils import parseaddr
+from typing import List, Dict, Any, Optional, Tuple
 from netra_common.models.email import EmailHeaders, HeaderAnalysisResult
+
+from .brands import brand_in_display_name, is_legitimate_for
+from .url_engine import extract_root_domain
 
 logger = logging.getLogger("netra.analyzer.header")
 
@@ -103,10 +107,30 @@ def analyze_headers(headers: EmailHeaders) -> HeaderAnalysisResult:
     if not headers.from_address:
         anomalies.append("Missing standard RFC 5322 From address header")
 
+    impersonated_brand, sender_domain = sender_brand_impersonation(headers.from_address)
+
     return HeaderAnalysisResult(
         spf_verdict=spf_verdict,
         dkim_verdict=dkim_verdict,
         dmarc_verdict=dmarc_verdict,
         has_authentication_results=has_auth_results,
         auth_anomalies=anomalies,
+        impersonated_brand=impersonated_brand,
+        sender_domain=sender_domain,
     )
+
+
+def sender_brand_impersonation(from_header: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
+    """(brand, sender root domain) when the display name claims a brand the domain isn't.
+
+    "DocuSign <dse@docusign.net>" is the real thing; "DocuSign <billing@cefilni.com>" is
+    not. Passing SPF does not help the second one: the attacker owns cefilni.com.
+    """
+    name, address = parseaddr(from_header or "")
+    if "@" not in address:
+        return None, None
+    sender_domain = extract_root_domain(address.rsplit("@", 1)[1].strip(" >"))
+    brand = brand_in_display_name(name)
+    if brand and not is_legitimate_for(brand, sender_domain):
+        return brand, sender_domain
+    return None, sender_domain

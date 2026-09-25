@@ -71,6 +71,8 @@ class HeaderAnalysisResult(BaseModel):
     authres_header_count: int = Field(default=0, description="Number of Authentication-Results headers found on the message")
     has_conflicting_auth_results: bool = Field(default=False, description="Multiple Authentication-Results headers disagree, a hallmark of a prepended forgery")
     auth_anomalies: List[str] = Field(default_factory=list, description="Specific authentication irregularities or failures flagged")
+    impersonated_brand: Optional[str] = Field(None, description="Brand the sender's display name claims while the sending domain is not that brand's")
+    sender_domain: Optional[str] = Field(None, description="Registered root domain of the From address")
 
 
 class DetectedTyposquat(BaseModel):
@@ -81,6 +83,15 @@ class DetectedTyposquat(BaseModel):
     similarity_ratio: float
 
 
+class ShortenedUrl(BaseModel):
+    """A link-shortener URL and where it was found to lead."""
+    original_url: str = Field(..., description="The short link as it appeared in the email")
+    chain: List[str] = Field(default_factory=list, description="Every hop in order, starting with the original short link")
+    final_url: Optional[str] = Field(None, description="Resolved destination; None when resolution did not finish")
+    resolved: bool = Field(default=False, description="True only when a non-shortener destination was reached")
+    failure_reason: Optional[str] = Field(None, description="Why resolution stopped early; unresolved never means clean")
+
+
 class UrlAnalysisResult(BaseModel):
     """URL and domain reputation/lexical analysis findings."""
     total_urls_inspected: int = Field(default=0)
@@ -89,6 +100,8 @@ class UrlAnalysisResult(BaseModel):
     ip_host_urls: List[str] = Field(default_factory=list, description="URLs pointing directly to bare IP addresses")
     defanged_urls: List[str] = Field(default_factory=list, description="Defanged URLs (e.g. hxxp, [.] ) detected")
     suspicious_url_flags: List[str] = Field(default_factory=list, description="Heuristic flags (excessive subdomains, punycode, etc.)")
+    shortened_urls: List[ShortenedUrl] = Field(default_factory=list, description="Link-shortener URLs and their resolved destinations")
+    abused_hosting_urls: List[str] = Field(default_factory=list, description="Links on IPFS gateways or throwaway app hosting commonly used for phishing pages")
 
 
 class ContentAnalysisResult(BaseModel):
@@ -99,6 +112,7 @@ class ContentAnalysisResult(BaseModel):
     matched_patterns: List[str] = Field(default_factory=list, description="List of specific heuristic phrase categories triggered")
     matched_keywords: List[str] = Field(default_factory=list, description="Snippets of matching suspicious terms")
     heuristic_content_score: float = Field(default=0.0, description="Heuristic threat indicator score from 0.0 to 1.0")
+    lure_matches: Dict[str, str] = Field(default_factory=dict, description="Modern lure type -> the text that matched it")
 
 
 class FlaggedAttachment(BaseModel):
@@ -117,6 +131,7 @@ class AttachmentAnalysisResult(BaseModel):
     has_double_extension: bool = Field(default=False, description="Whether a double extension was detected (e.g., .pdf.exe)")
     has_mime_mismatch: bool = Field(default=False, description="Whether MIME type conflicts with file extension")
     flagged_attachments: List[FlaggedAttachment] = Field(default_factory=list, description="Detailed records of flagged attachments")
+    html_attachments: List[str] = Field(default_factory=list, description="Attached HTML/SVG files, a common vector for fake login pages")
 
 
 class AnalysisResults(BaseModel):
