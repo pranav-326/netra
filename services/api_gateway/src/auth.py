@@ -173,10 +173,7 @@ class CreateUserRequest(BaseModel):
     role: str = ROLE_ANALYST
 
 
-@router.post("/api/v1/auth/users", status_code=status.HTTP_201_CREATED, tags=["Auth"])
-async def create_user(payload: CreateUserRequest, request: Request,
-                      admin: Principal = Depends(require_role(ROLE_ADMIN)),
-                      session: AsyncSession = Depends(get_db_session)):
+async def validate_new_user(payload: CreateUserRequest, session: AsyncSession) -> str:
     username = payload.username.strip().lower()
     if not USERNAME_PATTERN.match(username):
         raise HTTPException(status_code=422, detail="Usernames are 3–32 characters: lowercase letters, digits, . _ -")
@@ -186,12 +183,33 @@ async def create_user(payload: CreateUserRequest, request: Request,
         raise HTTPException(status_code=422, detail=f"Role must be one of: {', '.join(ROLE_RANK)}.")
     if await session.get(User, username):
         raise HTTPException(status_code=409, detail=f"An account named '{username}' already exists.")
+    return username
+
+
+@router.post("/api/v1/auth/users", status_code=status.HTTP_201_CREATED, tags=["Auth"])
+async def create_user(payload: CreateUserRequest, request: Request,
+                      admin: Principal = Depends(require_role(ROLE_ADMIN)),
+                      session: AsyncSession = Depends(get_db_session)):
+    username = await validate_new_user(payload, session)
 
     session.add(User(username=username, role=payload.role,
                      password_hash=await asyncio.to_thread(hash_password, payload.password)))
     await session.commit()
     await record(audit_event(request, admin, "user.create", username, role_granted=payload.role))
     return {"username": username, "role": payload.role}
+
+
+@router.post("/api/v1/auth/register", status_code=status.HTTP_201_CREATED, tags=["Auth"])
+async def register_user(payload: CreateUserRequest, request: Request,
+                        session: AsyncSession = Depends(get_db_session)):
+    """Create a self-service analyst account; public registration cannot grant admin access."""
+    payload.role = ROLE_ANALYST
+    username = await validate_new_user(payload, session)
+    session.add(User(username=username, role=ROLE_ANALYST,
+                     password_hash=await asyncio.to_thread(hash_password, payload.password)))
+    await session.commit()
+    await record(audit_event(request, None, "user.register", username, role_granted=ROLE_ANALYST))
+    return {"username": username, "role": ROLE_ANALYST}
 
 
 # ---------------------------------------------------------------------------

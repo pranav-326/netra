@@ -109,6 +109,38 @@ export async function ingestEmailFile(file) {
   return res.json();
 }
 
+export async function createAnalystUser(username, password) {
+  const res = await authorizedFetch(`${getGatewayBase()}/api/v1/auth/users`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, password, role: 'analyst' }),
+    signal: AbortSignal.timeout(10000),
+  });
+
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.detail || `User creation failed (HTTP ${res.status}).`);
+  }
+
+  return res.json();
+}
+
+export async function registerUser(username, password) {
+  const res = await fetch(`${getGatewayBase()}/api/v1/auth/register`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, password }),
+    signal: AbortSignal.timeout(10000),
+  });
+
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.detail || `Account creation failed (HTTP ${res.status}).`);
+  }
+
+  return res.json();
+}
+
 export async function fetchReportsList() {
   const base = getGatewayBase();
   try {

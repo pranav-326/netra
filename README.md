@@ -562,12 +562,13 @@ real campaign structure. That experiment has not been run.
 
 ## Authentication
 
-Every endpoint that returns or accepts evidence requires a signed-in user. Only
-`/health` and `/api/v1/pipeline/stages` are public. The web UI sends signed-out visitors to
-a sign-in page.
+Every endpoint that returns or accepts evidence requires a signed-in user. The health,
+pipeline-stage, and account-registration endpoints are public. The web UI sends signed-out
+visitors to a sign-in page.
 
-**Roles.** An *analyst* submits emails and reads reports, graphs and live pipeline
-streams. An *admin* can also create accounts and read the audit log.
+**Roles.** An *analyst* submits `.eml` files or raw email text and reads the reports,
+graphs, and live pipeline streams created by that account. An *admin* can also create
+accounts, view all reports, and read the audit log.
 
 **Setup.** Put these in `.env` (template in `.env.example`):
 
@@ -584,6 +585,35 @@ More accounts are created by an admin:
 curl -X POST http://localhost:8080/api/v1/auth/users \
   -H "Authorization: Bearer $ADMIN_TOKEN" -H 'Content-Type: application/json' \
   -d '{"username": "priya", "password": "at-least-12-characters", "role": "analyst"}'
+```
+
+### Self-service account creation
+
+Non-technical users can create their own analyst account from the web UI:
+
+1. Open `http://localhost:3000/register`, or choose **Create an account** on the sign-in page.
+2. Enter a username and a password of at least 12 characters.
+3. Netra signs the user in and opens the email analysis page.
+4. Upload an `.eml` file from **Analyze Email** and follow the live pipeline.
+
+Public registration always creates the `analyst` role. It cannot grant administrator
+access. Each uploaded email is associated with the signed-in username, so analysts see
+only their own reports; administrators can see all reports.
+
+The API equivalent is:
+
+```bash
+curl -X POST http://localhost:8080/api/v1/auth/register \
+  -H 'Content-Type: application/json' \
+  -d '{"username": "new-user", "password": "at-least-12-characters"}'
+```
+
+When source code changes, rebuild the services so Docker does not continue serving an
+older image:
+
+```bash
+docker compose build frontend api_gateway
+docker compose up -d frontend api_gateway
 ```
 
 **How it works.**

@@ -2,7 +2,7 @@
 
 import React, { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { AlertTriangle, Loader2, Lock, ScrollText } from 'lucide-react';
+import { AlertTriangle, Loader2, Lock, ScrollText, UserPlus } from 'lucide-react';
 import NetraMark from '@/components/brand/NetraMark';
 import { getSession, safeNextPath, signIn } from '@/lib/auth';
 
@@ -111,11 +111,20 @@ export default function LoginPage() {
           </button>
         </form>
 
+        <button
+          type="button"
+          onClick={() => router.push('/register')}
+          className="w-full mt-3 flex items-center justify-center gap-2 px-4 py-2.5 text-sm font-semibold rounded-lg border border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 transition"
+        >
+          <UserPlus className="w-4 h-4" aria-hidden="true" />
+          Create an account
+        </button>
+
         <p className="mt-4 flex items-start gap-2 text-[11px] leading-relaxed text-slate-500 dark:text-slate-400">
           <ScrollText className="w-3.5 h-3.5 shrink-0 mt-px" aria-hidden="true" />
           <span>
             Access is recorded. Every sign-in, report view and email submission is written to the audit
-            trail with your username. Accounts are issued by a Netra administrator.
+            trail with your username. Your account can upload EML files and view its own analyses.
           </span>
         </p>
       </div>

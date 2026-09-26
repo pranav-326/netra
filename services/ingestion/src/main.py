@@ -36,6 +36,7 @@ redis_client: aioredis.Redis = None
 minio_client: MinioStorageClient = None
 event_publisher: AsyncPipelineEventPublisher = None
 INGESTION_QUEUE = "email_ingestion_queue"
+OWNER_KEY_TTL_SECONDS = 7 * 24 * 60 * 60
 
 
 @asynccontextmanager
@@ -114,6 +115,7 @@ async def queue_with_audit(event: IngestionEvent, raw: bytes, principal: Princip
     async with redis_client.pipeline(transaction=True) as pipe:
         pipe.lpush(INGESTION_QUEUE, event.model_dump_json())
         pipe.lpush(AUDIT_QUEUE, audit.model_dump_json())
+        pipe.set(f"email_owner:{event.email_id}", principal.username, ex=OWNER_KEY_TTL_SECONDS)
         await pipe.execute()
 
 

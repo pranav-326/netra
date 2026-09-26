@@ -31,7 +31,7 @@ from netra_common.events import (
 )
 from netra_common.fastapi_auth import require_role
 from netra_common.models.email import CorrelatedEmail
-from netra_common.security import ROLE_ANALYST, Principal, require_secret
+from netra_common.security import ROLE_ADMIN, ROLE_ANALYST, Principal, require_secret
 from src.auth import (
     audit_consumer_loop,
     audit_event,
@@ -91,6 +91,7 @@ async def persistence_worker_loop():
 
             # Extract report properties
             email_id = correlated.email_id
+            owner_username = await redis_client.get(f"email_owner:{email_id}") if redis_client else None
             parsed_headers = correlated.enriched_email.classified_email.analyzed_email.parsed_email.headers
             assessment = correlated.enriched_email.classified_email.threat_assessment
             correlation = correlated.correlation
@@ -107,6 +108,7 @@ async def persistence_worker_loop():
                     # Check if already exists (upsert)
                     existing = await session.get(EmailReport, email_id)
                     if existing:
+                        existing.owner_username = owner_username
                         existing.subject = subject
                         existing.sender = sender
                         existing.classification = verdict
@@ -116,6 +118,7 @@ async def persistence_worker_loop():
                     else:
                         report_record = EmailReport(
                             email_id=email_id,
+                            owner_username=owner_username,
                             subject=subject,
                             sender=sender,
                             classification=verdict,
@@ -265,6 +268,8 @@ async def list_reports(
 ):
     """Retrieve paginated list of recent finalized email threat reports."""
     query = select(EmailReport).order_by(desc(EmailReport.created_at)).limit(limit).offset(offset)
+    if principal.role != ROLE_ADMIN:
+        query = query.where(EmailReport.owner_username == principal.username)
     if classification:
         query = query.where(EmailReport.classification == classification.upper())
 
@@ -295,6 +300,8 @@ async def get_report_by_id(
 ):
     """Retrieve full, finalized threat report for an email."""
     report = await session.get(EmailReport, email_id)
+    if report and principal.role != ROLE_ADMIN and report.owner_username != principal.username:
+        report = None
     await record(audit_event(request, principal, "report.view", email_id, success=report is not None))
     if not report:
         raise HTTPException(status_code=404, detail=f"Threat report for email {email_id} not found.")

@@ -5,7 +5,7 @@ Stores finalized threat intelligence reports, classification metrics, and IOC gr
 from datetime import datetime
 from typing import AsyncGenerator
 
-from sqlalchemy import BigInteger, Boolean, Column, String, Integer, DateTime, JSON, Text
+from sqlalchemy import BigInteger, Boolean, Column, String, Integer, DateTime, JSON, Text, text
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import declarative_base
 
@@ -19,6 +19,7 @@ class EmailReport(Base):
     __tablename__ = "email_reports"
 
     email_id = Column(String(64), primary_key=True, index=True)
+    owner_username = Column(String(32), nullable=True, index=True)
     subject = Column(Text, nullable=True)
     sender = Column(Text, nullable=True)
     classification = Column(String(32), nullable=False, index=True)
@@ -71,6 +72,9 @@ async def init_db():
     """Create tables if they do not already exist."""
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        await conn.execute(text(
+            "ALTER TABLE email_reports ADD COLUMN IF NOT EXISTS owner_username VARCHAR(32)"
+        ))
 
 
 async def get_db_session() -> AsyncGenerator[AsyncSession, None]:

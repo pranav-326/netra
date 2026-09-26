@@ -5,7 +5,7 @@ import { usePathname, useRouter } from 'next/navigation';
 import { Loader2 } from 'lucide-react';
 import { getSession, onSessionChange } from '@/lib/auth';
 
-const PUBLIC_PATHS = new Set(['/login']);
+const PUBLIC_PATHS = new Set(['/login', '/register']);
 
 /** Renders a page only for a signed-in user; everyone else is sent to /login. */
 export default function AuthGuard({ children }) {

@@ -3,7 +3,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
-import { User, Sun, Moon, Laptop, Menu, X, LogOut } from 'lucide-react';
+import { User, Sun, Moon, Laptop, Menu, X, LogOut, UserPlus } from 'lucide-react';
 import { useTheme } from '@/context/ThemeContext';
 import NetraMark from '@/components/brand/NetraMark';
 import { getSession, onSessionChange, signOut } from '@/lib/auth';
@@ -51,6 +51,7 @@ export default function Navbar() {
     { name: 'Investigations', href: '/investigations' },
     { name: 'Report', href: '/report' },
   ];
+  const adminLinks = session?.role === 'admin' ? [{ name: 'Users', href: '/admin/users', icon: UserPlus }] : [];
 
   return (
     <header className="sticky top-0 z-50 w-full backdrop-blur-md bg-[#f4f6f8]/85 dark:bg-[#0c1017]/85 border-b border-slate-200/80 dark:border-slate-800 transition-colors">
@@ -79,6 +80,22 @@ export default function Navbar() {
         {session && (
         <nav className="hidden md:flex items-center gap-1.5 p-1 rounded-xl bg-slate-200/50 dark:bg-slate-800/50 border border-slate-200/60 dark:border-slate-700/50">
           {navLinks.map((link) => {
+            const isActive = pathname === link.href;
+            return (
+              <Link
+                key={link.name}
+                href={link.href}
+                className={`px-3.5 py-1.5 text-xs font-medium rounded-lg transition-all ${
+                  isActive
+                    ? 'bg-white dark:bg-slate-900 text-brand-700 dark:text-brand-300 shadow-sm border border-slate-200/80 dark:border-slate-700 font-semibold'
+                    : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200 hover:bg-white/50 dark:hover:bg-slate-800/60'
+                }`}
+              >
+                {link.name}
+              </Link>
+            );
+          })}
+          {adminLinks.map((link) => {
             const isActive = pathname === link.href;
             return (
               <Link
@@ -218,6 +235,15 @@ export default function Navbar() {
               </Link>
             );
           })}
+          {adminLinks.map((link) => (
+            <Link
+              key={link.name}
+              href={link.href}
+              className="block px-3 py-2 rounded-lg text-sm font-medium text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800"
+            >
+              {link.name}
+            </Link>
+          ))}
           <Link
             href="/analyze"
             className="block mt-2 px-3 py-2 rounded-lg text-sm font-semibold bg-brand-600 hover:bg-brand-700 text-white text-center transition"
