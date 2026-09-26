@@ -416,6 +416,43 @@ to every email.
 silently exonerate malicious infrastructure. Covered by
 `tests/test_threat_intel_providers.py`.
 
+## Link shorteners (TinyURL, bit.ly)
+
+A shortened link hides its destination, which would blind every URL check: the
+typosquat detector sees `tinyurl.com`, not the lookalike domain behind it. The URL
+engine (`services/analyzer/src/engines/shortener.py`) resolves short links and analyses
+the real destination as if it had appeared in the email directly:
+
+1. A link whose host is on a list of 20 known shorteners (TinyURL, bit.ly, t.co, is.gd,
+   …) is sent for resolution.
+2. The analyzer asks the shortener where the link points: one HTTPS request, redirects
+   **not** followed, response body never read. Only the `Location` header is used.
+3. If the answer is another short link, it asks again, up to 5 hops. Deeper chains stop
+   and are reported.
+4. The final destination goes through every URL check: typosquatting, raw-IP hosts,
+   punycode, abused hosting.
+
+**Safety.** The attacker's destination is never contacted: loading it could tip them off
+that the email was opened, or serve a payload. Only hosts on the shortener list are ever
+contacted, always over HTTPS on the default port, so a URL in an email cannot make the
+analyzer connect to an arbitrary server.
+
+**Scoring.** The shortener itself is a weak signal, because legitimate marketing mail uses
+shorteners too: `URL-SHORTENER` adds **+5**, with the whole chain as evidence. The real
+weight lands on the destination:
+
+```
+URL-SHORTENER   +5    https://tinyurl.com/abc123 -> https://micros0ft.com/login
+URL-TYPOSQUAT   +40   impersonating microsoft.com
+```
+
+Without resolution, the same email would score 0 from its URL.
+
+**Failure behaviour.** A timeout, network error, expired link or over-deep chain is
+reported as *unresolved*, never as clean. Successful resolutions are cached for six hours;
+network failures are not cached, so the next email retries. Offline corpus work
+(`ml/corpus.py`) does not resolve shorteners.
+
 ## Campaign Correlation Graph
 
 The correlation service (stage 6) writes an attack-infrastructure graph into Neo4j:
@@ -446,6 +483,53 @@ The layout is fixed rather than force-directed so the same case always draws the
 picture — a forensic artifact people compare across runs should not rearrange itself.
 When Neo4j is unreachable the panel says **"Graph unavailable"** and states explicitly
 that this is not the same as "no shared infrastructure found".
+
+### Why a graph: the detection argument
+
+A per-email classifier with recall *r* misses any single phishing email with
+probability 1 − r. When k emails share attacker infrastructure (an originating IP, a
+lookalike domain), the graph only has to catch **one** of them: the shared node links
+that verdict to every other member. The ring escapes only if every member is missed.
+If misses are independent:
+
+> **P(ring detected) = 1 − (1 − r)<sup>k</sup>**
+
+With r = 0.7258 (the Layer 4 model's out-of-fold recall):
+
+| k (emails in the ring) | P(ring missed) = (1 − r)<sup>k</sup> | P(ring detected) |
+| ---: | ---: | ---: |
+| 1 (one email alone) | 27.4% | 72.6% |
+| 2 | 7.5% | 92.5% |
+
+**What the ingested data actually contains.** The 90 emails in the graph collapse to 22
+distinct messages once resubmitted copies are merged. Excluding shared providers, two
+connected fraud rings exist, both of size k = 2:
+
+- **Credential phishing:** two password-reset emails from different sender domains
+  (`micros0ft-portal.com`, `micros0ft-support.com`), both linking to `micros0ft.com`.
+- **Wire fraud:** two invoice-payment emails sharing the IP `45.154.255.89` and the
+  domain `overdue-vendorgroup.net`.
+
+Reproduce with `NEO4J_HOST=localhost python -m ml.graph_connectivity`.
+
+**Conditions and limits.** This is an argument, not a measurement:
+
+- **Independence is the best case.** Emails in one campaign often share a template, so
+  a classifier that misses one tends to miss its siblings. With perfectly correlated
+  misses the ring is missed with probability 1 − r, exactly as a single email: no
+  gain. Real campaigns fall between (1 − r)<sup>k</sup> and 1 − r, and where they fall
+  has not been measured.
+- **Propagation needs attacker-owned edges.** Shared providers link unrelated mail:
+  unfiltered, one Google mail-relay IP joins five unrelated messages, and an
+  institution's domain links a malicious email to a benign colleague's. The analysis
+  therefore excludes common services (`COMMON_SERVICES` in `ml/graph_connectivity.py`);
+  a production propagation rule would need the same filter.
+- **Small sample.** Only rings of size 2 have been observed, among 22 distinct messages.
+- **r is the learned model alone,** not the full pipeline.
+
+Establishing the gain empirically requires an ablation: the same classifier with and
+without graph propagation, evaluated with a time-ordered split on mail that contains
+real campaign structure. That experiment has not been run.
 
 ## Running the Tests
 
