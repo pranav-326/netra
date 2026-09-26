@@ -19,6 +19,26 @@ API_GATEWAY_URL = os.getenv("API_GATEWAY_URL", "http://api_gateway:8080")
 INGESTION_URL = os.getenv("INGESTION_URL", "http://ingestion:8000")
 REDIS_HOST = os.getenv("REDIS_HOST", "redis")
 REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
+CONSOLE_USERNAME = os.getenv("NETRA_CONSOLE_USERNAME", "analyst")
+CONSOLE_PASSWORD = os.getenv("NETRA_CONSOLE_PASSWORD", "")
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _console_token() -> Optional[str]:
+    """Sign the console in once an hour with its configured account."""
+    if not CONSOLE_PASSWORD:
+        return None
+    try:
+        resp = requests.post(f"{API_GATEWAY_URL}/api/v1/auth/login",
+                             json={"username": CONSOLE_USERNAME, "password": CONSOLE_PASSWORD}, timeout=5)
+        return resp.json().get("access_token") if resp.status_code == 200 else None
+    except Exception:
+        return None
+
+
+def auth_headers() -> Dict[str, str]:
+    token = _console_token()
+    return {"Authorization": f"Bearer {token}"} if token else {}
 
 st.set_page_config(
     page_title="Netra Threat Pipeline - Live Console",
@@ -97,7 +117,7 @@ def get_redis_client():
 def fetch_reports_from_gateway() -> List[Dict[str, Any]]:
     """Retrieve list of threat reports from FastAPI API Gateway."""
     try:
-        resp = requests.get(f"{API_GATEWAY_URL}/api/v1/reports?limit=50", timeout=3)
+        resp = requests.get(f"{API_GATEWAY_URL}/api/v1/reports?limit=50", headers=auth_headers(), timeout=3)
         if resp.status_code == 200:
             return resp.json()
     except Exception:
@@ -108,7 +128,7 @@ def fetch_reports_from_gateway() -> List[Dict[str, Any]]:
 def fetch_report_by_id(email_id: str) -> Optional[Dict[str, Any]]:
     """Retrieve full finalized threat report from API Gateway."""
     try:
-        resp = requests.get(f"{API_GATEWAY_URL}/api/v1/reports/{email_id}", timeout=3)
+        resp = requests.get(f"{API_GATEWAY_URL}/api/v1/reports/{email_id}", headers=auth_headers(), timeout=3)
         if resp.status_code == 200:
             return resp.json()
     except Exception:
@@ -210,6 +230,7 @@ Chief Executive Officer"""
                         resp = requests.post(
                             f"{INGESTION_URL}/api/v1/ingest/text",
                             json={"raw_email": text_content},
+                            headers=auth_headers(),
                             timeout=5,
                         )
                         if resp.status_code == 202:
@@ -233,6 +254,7 @@ Chief Executive Officer"""
                         resp = requests.post(
                             f"{INGESTION_URL}/api/v1/ingest/file",
                             files=files,
+                            headers=auth_headers(),
                             timeout=5,
                         )
                         if resp.status_code == 202:

@@ -89,15 +89,22 @@ performed the work.
 | `GET /api/v1/pipeline/events/{email_id}` | SSE stream of live stage transitions; terminates on the persistence stage, on a stage failure, or after `NETRA_SSE_TIMEOUT_SECONDS` (default 45s) |
 | `GET /api/v1/pipeline/events/{email_id}/history` | Non-streaming fallback returning the recorded events for an email |
 
-Watch a real run from the command line:
+Watch a real run from the command line. Every call needs a token (see
+[Authentication](#authentication)); this signs in with the analyst account from `.env`:
 
 ```bash
-EMAIL_ID=$(curl -s -X POST http://localhost:8000/api/v1/ingest/text \
+set -a; source .env; set +a
+TOKEN=$(curl -s -X POST http://localhost:8080/api/v1/auth/login \
   -H 'Content-Type: application/json' \
+  -d "{\"username\": \"$NETRA_ANALYST_USERNAME\", \"password\": \"$NETRA_ANALYST_PASSWORD\"}" \
+  | python3 -c 'import json,sys;print(json.load(sys.stdin)["access_token"])')
+
+EMAIL_ID=$(curl -s -X POST http://localhost:8000/api/v1/ingest/text \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
   -d "{\"raw_email\": $(python3 -c 'import json,sys;print(json.dumps(open("tests/samples/phishing_sample.eml").read()))')}" \
   | python3 -c 'import json,sys;print(json.load(sys.stdin)["email_id"])')
 
-curl -N "http://localhost:8080/api/v1/pipeline/events/$EMAIL_ID"
+curl -N -H "Authorization: Bearer $TOKEN" "http://localhost:8080/api/v1/pipeline/events/$EMAIL_ID"
 ```
 
 ### Failure behaviour
@@ -472,7 +479,7 @@ and labelled with how many emails reach them.
 | `GET /api/v1/graph/{email_id}` | Nodes, edges, campaign, and stats for one email's subgraph |
 
 ```bash
-curl -s http://localhost:8080/api/v1/graph/<email_id> | python3 -m json.tool
+curl -s -H "Authorization: Bearer $TOKEN" http://localhost:8080/api/v1/graph/<email_id> | python3 -m json.tool
 ```
 
 This is the claim a per-message rule engine cannot make on its own: not "this email is
@@ -530,6 +537,63 @@ Reproduce with `NEO4J_HOST=localhost python -m ml.graph_connectivity`.
 Establishing the gain empirically requires an ablation: the same classifier with and
 without graph propagation, evaluated with a time-ordered split on mail that contains
 real campaign structure. That experiment has not been run.
+
+## Authentication
+
+Every endpoint that returns or accepts evidence requires a signed-in user. Only
+`/health` and `/api/v1/pipeline/stages` are public. The web UI sends signed-out visitors to
+a sign-in page.
+
+**Roles.** An *analyst* submits emails and reads reports, graphs and live pipeline
+streams. An *admin* can also create accounts and read the audit log.
+
+**Setup.** Put these in `.env` (template in `.env.example`):
+
+| Setting | Purpose |
+| :--- | :--- |
+| `NETRA_AUTH_SECRET` | Signs access tokens. The gateway and ingestion service refuse to start without it. |
+| `NETRA_ADMIN_PASSWORD` | Creates the `admin` account on first start, while no account exists. |
+| `NETRA_ANALYST_PASSWORD` | Optional: also creates an `analyst` account. |
+| `NETRA_TOKEN_TTL_SECONDS` | Session length; default 8 hours. |
+
+More accounts are created by an admin:
+
+```bash
+curl -X POST http://localhost:8080/api/v1/auth/users \
+  -H "Authorization: Bearer $ADMIN_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"username": "priya", "password": "at-least-12-characters", "role": "analyst"}'
+```
+
+**How it works.**
+
+- Sign-in (`POST /api/v1/auth/login`) returns an HMAC-signed token that both services
+  verify with the shared secret. Passwords are stored as salted PBKDF2-SHA256 hashes
+  (600,000 iterations). Ten failed attempts lock an account for 15 minutes.
+- Browsers cannot attach a token to a Server-Sent Events stream, and a token in a URL
+  would end up in access logs. So the UI first trades its token for a **single-use,
+  60-second ticket** (`POST /api/v1/pipeline/events/{id}/ticket`) and opens the stream
+  with that.
+- The UI keeps the token in `sessionStorage`, so closing the tab signs you out.
+
+**Audit trail.** Every sign-in (including failures), report view, report listing, graph
+view, stream, account creation and email submission is written to the `audit_events`
+table with the username, role, client IP and time. Admins read it at `GET /api/v1/audit`
+(filters: `username`, `action`, `resource`).
+
+Each submission's record includes the **SHA-256 of the raw email** and its MinIO object
+path, so anyone can later verify that the stored evidence is exactly what was submitted.
+The ingestion service queues that record in the same Redis transaction as the email
+itself: no email can enter the pipeline without its submission being recorded.
+
+**Limits.**
+
+- Tokens are stateless: signing out discards the token in the browser, but a copied
+  token stays valid until it expires. There is no server-side revocation list.
+- The token is readable by scripts on the page (`sessionStorage`), so it relies on the UI
+  being free of XSS. An HttpOnly cookie would remove that exposure.
+- The audit table is append-only by convention, not enforced by the database.
+- The internal Streamlit console signs in with its own configured account, but also reads
+  Redis directly, which bypasses these checks. It is a development tool; don't expose it.
 
 ## Running the Tests
 

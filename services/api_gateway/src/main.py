@@ -29,7 +29,17 @@ from netra_common.events import (
     channel_for,
     read_event_log,
 )
+from netra_common.fastapi_auth import require_role
 from netra_common.models.email import CorrelatedEmail
+from netra_common.security import ROLE_ANALYST, Principal, require_secret
+from src.auth import (
+    audit_consumer_loop,
+    audit_event,
+    bootstrap_accounts,
+    principal_for_stream,
+    record,
+    router as auth_router,
+)
 from src.database import init_db, get_db_session, async_session_maker, EmailReport
 from src.graph_reader import GraphUnavailable, Neo4jGraphReader
 
@@ -142,16 +152,22 @@ async def lifespan(app: FastAPI):
     global redis_client, consumer_task, event_publisher, graph_reader
     logger.info("Starting Netra API Gateway...")
 
+    # Refuse to serve evidence without a signing key.
+    require_secret(settings.NETRA_AUTH_SECRET)
+
     # Initialize PostgreSQL schema
     try:
         await init_db()
         logger.info("PostgreSQL database initialized.")
+        await bootstrap_accounts()
     except Exception as e:
         logger.error(f"Failed to initialize PostgreSQL: {e}")
 
     # Initialize Redis connection
     redis_client = aioredis.from_url(settings.redis_url, decode_responses=True)
+    app.state.redis = redis_client
     event_publisher = AsyncPipelineEventPublisher(redis_client)
+    audit_task = asyncio.create_task(audit_consumer_loop(redis_client))
 
     # Neo4j read-side for campaign subgraphs
     graph_reader = Neo4jGraphReader()
@@ -163,12 +179,13 @@ async def lifespan(app: FastAPI):
     yield
 
     # Clean shutdown
-    if consumer_task:
-        consumer_task.cancel()
-        try:
-            await consumer_task
-        except asyncio.CancelledError:
-            pass
+    for task in (consumer_task, audit_task):
+        if task:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
 
     if graph_reader:
         await graph_reader.close()
@@ -192,6 +209,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+app.include_router(auth_router)
+
+# Every route that returns evidence needs a signed-in analyst (admins included).
+analyst = require_role(ROLE_ANALYST)
 
 
 class ReportSummary(BaseModel):
@@ -234,10 +256,12 @@ async def health_check():
 
 @app.get("/api/v1/reports", response_model=List[ReportSummary], tags=["Reports"])
 async def list_reports(
+    request: Request,
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
     classification: Optional[str] = Query(None),
     session: AsyncSession = Depends(get_db_session),
+    principal: Principal = Depends(analyst),
 ):
     """Retrieve paginated list of recent finalized email threat reports."""
     query = select(EmailReport).order_by(desc(EmailReport.created_at)).limit(limit).offset(offset)
@@ -246,6 +270,7 @@ async def list_reports(
 
     result = await session.execute(query)
     records = result.scalars().all()
+    await record(audit_event(request, principal, "report.list", count=len(records)))
 
     return [
         ReportSummary(
@@ -264,14 +289,17 @@ async def list_reports(
 @app.get("/api/v1/reports/{email_id}", tags=["Reports"])
 async def get_report_by_id(
     email_id: str,
+    request: Request,
     session: AsyncSession = Depends(get_db_session),
+    principal: Principal = Depends(analyst),
 ):
     """Retrieve full, finalized threat report for an email."""
-    record = await session.get(EmailReport, email_id)
-    if not record:
+    report = await session.get(EmailReport, email_id)
+    await record(audit_event(request, principal, "report.view", email_id, success=report is not None))
+    if not report:
         raise HTTPException(status_code=404, detail=f"Threat report for email {email_id} not found.")
 
-    return record.full_report
+    return report.full_report
 
 
 @app.get("/api/v1/pipeline/stages", tags=["Pipeline"])
@@ -358,13 +386,18 @@ def _sse_frame(event_name: str, data: Dict[str, Any]) -> str:
 
 
 @app.get("/api/v1/pipeline/events/{email_id}", tags=["Pipeline"])
-async def stream_pipeline_events(email_id: str, request: Request):
+async def stream_pipeline_events(email_id: str, request: Request, ticket: Optional[str] = Query(None)):
     """Stream real pipeline stage transitions for an email over Server-Sent Events.
 
     Each `stage` frame is emitted by the service that actually did the work, and
     carries that service's measured latency. The stream terminates on the
     persistence stage, on a stage failure, or after SSE_TIMEOUT_SECONDS.
+
+    Authenticate with a bearer token, or (browsers) a single-use `ticket` from
+    POST /api/v1/pipeline/events/{email_id}/ticket.
     """
+    principal = await principal_for_stream(request, email_id, ticket)
+    await record(audit_event(request, principal, "pipeline.stream", email_id))
     return StreamingResponse(
         _pipeline_event_stream(email_id, request),
         media_type="text/event-stream",
@@ -377,7 +410,7 @@ async def stream_pipeline_events(email_id: str, request: Request):
 
 
 @app.get("/api/v1/pipeline/events/{email_id}/history", tags=["Pipeline"])
-async def get_pipeline_event_history(email_id: str):
+async def get_pipeline_event_history(email_id: str, principal: Principal = Depends(analyst)):
     """Non-streaming fallback returning the recorded stage events for an email."""
     if not redis_client:
         raise HTTPException(status_code=503, detail="Event bus unavailable.")
@@ -392,13 +425,14 @@ async def get_pipeline_event_history(email_id: str):
 
 
 @app.get("/api/v1/graph/{email_id}", tags=["Graph"])
-async def get_email_subgraph(email_id: str):
+async def get_email_subgraph(email_id: str, request: Request, principal: Principal = Depends(analyst)):
     """Return the Neo4j attack-infrastructure subgraph centred on one email.
 
     Nodes are the email itself, the IOCs it touches, other emails reaching those same
     IOCs, and the campaign cluster. This is what backs the "shares infrastructure with
     N other emails" claim in the forensic report.
     """
+    await record(audit_event(request, principal, "graph.view", email_id))
     if not graph_reader:
         raise HTTPException(status_code=503, detail="Graph reader not initialized.")
 

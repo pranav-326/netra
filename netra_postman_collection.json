@@ -7,6 +7,39 @@
   },
   "item": [
     {
+      "name": "0. Sign in (run first)",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "const body = pm.response.json();",
+              "if (body.access_token) { pm.collectionVariables.set('netra_token', body.access_token); }",
+              "pm.test('signed in', () => pm.response.to.have.status(200));"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "auth": {
+          "type": "noauth"
+        },
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\"username\": \"{{netra_username}}\", \"password\": \"{{netra_password}}\"}"
+        },
+        "url": "http://localhost:8080/api/v1/auth/login"
+      }
+    },
+    {
       "name": "1. Health Check",
       "request": {
         "method": "GET",
@@ -22,7 +55,10 @@
             "health"
           ]
         },
-        "description": "Verify that the Ingestion API, Redis broker, and MinIO object store are reachable and healthy."
+        "description": "Verify that the Ingestion API, Redis broker, and MinIO object store are reachable and healthy.",
+        "auth": {
+          "type": "noauth"
+        }
       },
       "response": []
     },
@@ -125,5 +161,31 @@
       },
       "response": []
     }
-  ]
+  ],
+  "variable": [
+    {
+      "key": "netra_username",
+      "value": "analyst"
+    },
+    {
+      "key": "netra_password",
+      "value": "",
+      "description": "NETRA_ANALYST_PASSWORD from .env; never commit a real value"
+    },
+    {
+      "key": "netra_token",
+      "value": "",
+      "description": "Filled in by '0. Sign in'"
+    }
+  ],
+  "auth": {
+    "type": "bearer",
+    "bearer": [
+      {
+        "key": "token",
+        "value": "{{netra_token}}",
+        "type": "string"
+      }
+    ]
+  }
 }

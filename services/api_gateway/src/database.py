@@ -5,7 +5,7 @@ Stores finalized threat intelligence reports, classification metrics, and IOC gr
 from datetime import datetime
 from typing import AsyncGenerator
 
-from sqlalchemy import Column, String, Integer, DateTime, JSON, Text
+from sqlalchemy import BigInteger, Boolean, Column, String, Integer, DateTime, JSON, Text
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import declarative_base
 
@@ -26,6 +26,32 @@ class EmailReport(Base):
     campaign_id = Column(String(64), nullable=True, index=True)
     full_report = Column(JSON, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+
+class User(Base):
+    """An analyst or administrator who can sign in (Layer 9)."""
+    __tablename__ = "users"
+
+    username = Column(String(32), primary_key=True)
+    password_hash = Column(Text, nullable=False)
+    role = Column(String(16), nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class AuditRecord(Base):
+    """Append-only record of who did what to which evidence (Layer 9)."""
+    __tablename__ = "audit_events"
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    at = Column(DateTime, nullable=False, index=True)
+    service = Column(String(32), nullable=False)
+    username = Column(String(32), nullable=True, index=True)
+    role = Column(String(16), nullable=True)
+    action = Column(String(48), nullable=False, index=True)
+    resource = Column(String(128), nullable=True, index=True)
+    success = Column(Boolean, nullable=False)
+    client_ip = Column(String(64), nullable=True)
+    detail = Column(JSON, nullable=False)
 
 
 # Async database engine & session factory

@@ -82,5 +82,18 @@ class Settings(BaseSettings):
         """Live IP enrichment runs only when explicitly enabled and a key is present."""
         return bool(self.ABUSEIPDB_ENABLED and self.ABUSEIPDB_API_KEY.strip())
 
+    # ------------------------------------------------------------------
+    # Layer 9: Authentication
+    # ------------------------------------------------------------------
+    # Shared by every service that verifies tokens. Services refuse to start without it
+    # rather than run unauthenticated.
+    NETRA_AUTH_SECRET: str = Field(default="", description="HMAC key for signing access tokens (32+ random bytes)")
+    NETRA_TOKEN_TTL_SECONDS: int = Field(default=8 * 3600, description="Access token lifetime: one working shift")
+    # Accounts created on first gateway start when the users table is empty.
+    NETRA_ADMIN_USERNAME: str = Field(default="admin")
+    NETRA_ADMIN_PASSWORD: str = Field(default="", description="Bootstrap admin password; no admin is created when empty")
+    NETRA_ANALYST_USERNAME: str = Field(default="analyst")
+    NETRA_ANALYST_PASSWORD: str = Field(default="", description="Optional bootstrap analyst password")
+
 
 settings = Settings()

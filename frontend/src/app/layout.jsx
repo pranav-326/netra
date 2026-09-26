@@ -2,6 +2,7 @@ import './globals.css';
 import { ThemeProvider } from '@/context/ThemeContext';
 import Navbar from '@/components/layout/Navbar';
 import Footer from '@/components/layout/Footer';
+import AuthGuard from '@/components/layout/AuthGuard';
 
 // The mark, inlined as a data URI so the tab icon needs no extra request and stays
 // crisp at every density. Brand blue #0F3BB0 on transparent.
@@ -46,7 +47,7 @@ export default function RootLayout({ children }) {
           </a>
           <Navbar />
           <main id="main" className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-8">
-            {children}
+            <AuthGuard>{children}</AuthGuard>
           </main>
           <Footer />
         </ThemeProvider>

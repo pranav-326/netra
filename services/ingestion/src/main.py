@@ -3,6 +3,7 @@ FastAPI service accepting .eml uploads and raw email text, persisting to MinIO,
 and publishing ingestion events to Redis.
 """
 
+import hashlib
 import time
 import uuid
 import logging
@@ -10,14 +11,17 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Dict, Any
 
-from fastapi import FastAPI, File, UploadFile, HTTPException, status
+from fastapi import Depends, FastAPI, File, Request, UploadFile, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 import redis.asyncio as aioredis
 
+from netra_common.audit import AUDIT_QUEUE, AuditEvent
 from netra_common.config import settings
 from netra_common.events import AsyncPipelineEventPublisher, PipelineStage
+from netra_common.fastapi_auth import client_ip, require_role
 from netra_common.models.email import IngestionEvent
+from netra_common.security import ROLE_ANALYST, Principal, require_secret
 from netra_common.storage.minio_client import MinioStorageClient
 
 # Setup logging
@@ -39,6 +43,7 @@ async def lifespan(app: FastAPI):
     """Initialize Redis and MinIO storage clients on service startup."""
     global redis_client, minio_client, event_publisher
     logger.info("Initializing Netra Ingestion Service...")
+    require_secret(settings.NETRA_AUTH_SECRET)
 
     # Redis connection
     redis_client = aioredis.from_url(
@@ -81,6 +86,33 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+async def queue_with_audit(event: IngestionEvent, raw: bytes, principal: Principal, request: Request) -> None:
+    """Queue the email and its chain-of-custody record in one Redis transaction.
+
+    Either both land or neither does, so no email enters the pipeline unrecorded. The
+    SHA-256 lets anyone later verify the object in MinIO is the bytes that were submitted.
+    """
+    audit = AuditEvent(
+        service="ingestion",
+        username=principal.username,
+        role=principal.role,
+        action="email.ingest",
+        resource=event.email_id,
+        client_ip=client_ip(request),
+        detail={
+            "sha256": hashlib.sha256(raw).hexdigest(),
+            "size_bytes": len(raw),
+            "source_type": event.source_type,
+            "original_filename": event.original_filename,
+            "object": f"{event.bucket}/{event.object_key}",
+        },
+    )
+    async with redis_client.pipeline(transaction=True) as pipe:
+        pipe.lpush(INGESTION_QUEUE, event.model_dump_json())
+        pipe.lpush(AUDIT_QUEUE, audit.model_dump_json())
+        await pipe.execute()
 
 
 class RawEmailTextRequest(BaseModel):
@@ -127,7 +159,11 @@ async def health_check():
     status_code=status.HTTP_202_ACCEPTED,
     tags=["Ingestion"],
 )
-async def ingest_eml_file(file: UploadFile = File(...)):
+async def ingest_eml_file(
+    request: Request,
+    file: UploadFile = File(...),
+    principal: Principal = Depends(require_role(ROLE_ANALYST)),
+):
     """Upload a raw .eml file."""
     started = time.perf_counter()
     if not file.filename:
@@ -169,7 +205,7 @@ async def ingest_eml_file(file: UploadFile = File(...)):
     )
 
     try:
-        await redis_client.lpush(INGESTION_QUEUE, event.model_dump_json())
+        await queue_with_audit(event, content, principal, request)
     except Exception as e:
         logger.error(f"Failed to push event {email_id} to Redis: {e}")
         raise HTTPException(status_code=500, detail="Message broker failure.")
@@ -199,7 +235,11 @@ async def ingest_eml_file(file: UploadFile = File(...)):
     status_code=status.HTTP_202_ACCEPTED,
     tags=["Ingestion"],
 )
-async def ingest_raw_text(payload: RawEmailTextRequest):
+async def ingest_raw_text(
+    payload: RawEmailTextRequest,
+    request: Request,
+    principal: Principal = Depends(require_role(ROLE_ANALYST)),
+):
     """Ingest raw email text/headers provided via JSON."""
     started = time.perf_counter()
     raw_bytes = payload.raw_email.encode("utf-8")
@@ -232,7 +272,7 @@ async def ingest_raw_text(payload: RawEmailTextRequest):
     )
 
     try:
-        await redis_client.lpush(INGESTION_QUEUE, event.model_dump_json())
+        await queue_with_audit(event, raw_bytes, principal, request)
     except Exception as e:
         logger.error(f"Failed to push event {email_id} to Redis: {e}")
         raise HTTPException(status_code=500, detail="Message broker failure.")
