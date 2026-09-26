@@ -21,6 +21,8 @@ downloads/
 eggs/
 .eggs/
 lib/
+# The Python packaging rule above must not swallow the frontend's source folder.
+!frontend/src/lib/
 lib64/
 parts/
 sdist/
