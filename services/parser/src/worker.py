@@ -74,12 +74,12 @@ class EmailParserWorker:
         )
         self.events = PipelineEventPublisher(self.redis_client)
 
-        # MinIO client
+        # Evidence store (SeaweedFS over S3)
         self.minio_client = MinioStorageClient(
-            endpoint=settings.MINIO_ENDPOINT,
-            access_key=settings.MINIO_ROOT_USER,
-            secret_key=settings.MINIO_ROOT_PASSWORD,
-            secure=settings.MINIO_SECURE,
+            endpoint=settings.S3_ENDPOINT,
+            access_key=settings.S3_ACCESS_KEY,
+            secret_key=settings.S3_SECRET_KEY,
+            secure=settings.S3_SECURE,
         )
         self.minio_client.ensure_bucket(settings.ATTACHMENTS_BUCKET)
 

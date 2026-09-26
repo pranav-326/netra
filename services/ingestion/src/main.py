@@ -51,14 +51,16 @@ async def lifespan(app: FastAPI):
         decode_responses=True
     )
 
-    # MinIO client
+    # Evidence store (SeaweedFS over S3). Ingestion is the first service to touch it,
+    # so it provisions every evidence bucket.
     minio_client = MinioStorageClient(
-        endpoint=settings.MINIO_ENDPOINT,
-        access_key=settings.MINIO_ROOT_USER,
-        secret_key=settings.MINIO_ROOT_PASSWORD,
-        secure=settings.MINIO_SECURE,
+        endpoint=settings.S3_ENDPOINT,
+        access_key=settings.S3_ACCESS_KEY,
+        secret_key=settings.S3_SECRET_KEY,
+        secure=settings.S3_SECURE,
     )
-    minio_client.ensure_bucket(settings.RAW_EMAILS_BUCKET)
+    for bucket in settings.evidence_buckets:
+        minio_client.ensure_bucket(bucket)
 
     # Pipeline telemetry publisher (Layer 1 stage events)
     event_publisher = AsyncPipelineEventPublisher(redis_client)
@@ -141,15 +143,15 @@ async def health_check():
     except Exception as e:
         logger.error(f"Redis health check failed: {e}")
 
-    minio_ok = minio_client.check_health() if minio_client else False
+    storage_ok = minio_client.check_health() if minio_client else False
 
-    healthy = redis_ok and minio_ok
+    healthy = redis_ok and storage_ok
     status_code = status.HTTP_200_OK if healthy else status.HTTP_503_SERVICE_UNAVAILABLE
 
     return {
         "status": "healthy" if healthy else "degraded",
         "redis_connected": redis_ok,
-        "minio_connected": minio_ok,
+        "object_store_connected": storage_ok,
     }
 
 

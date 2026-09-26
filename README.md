@@ -14,7 +14,7 @@ The system is decomposed into 10 logical layers:
 - **Layer 5: Threat Intelligence** - Multi-source threat enrichment (VirusTotal, AbuseIPDB, WHOIS, URLhaus, MISP).
 - **Layer 6: Correlation & Graph Analysis** - Infrastructure mapping in Neo4j, campaign similarity clustering.
 - **Layer 7: Risk, Explainability & Output** - Risk scoring (0–100), SHAP/LIME explainability, PDF/JSON forensic reports.
-- **Layer 8: Data & Infrastructure (Core)** - PostgreSQL, Neo4j, OpenSearch, Redis, MinIO S3.
+- **Layer 8: Data & Infrastructure (Core)** - PostgreSQL, Neo4j, OpenSearch, Redis, SeaweedFS (S3).
 - **Layer 9: Security & Compliance** - Keycloak OIDC/RBAC, audit trails, PII/data masking.
 - **Layer 10: External Feeds** - Real-time DNSBL, threat lists, and reputation feeds.
 
@@ -30,8 +30,30 @@ The local development infrastructure stack is provisioned via `docker-compose.ym
 | **Redis 7** | `6379` | Fast caching, task queue (Celery), pipeline event bus | `netra_redis_data` |
 | **OpenSearch 2.13** | `9200`, `9600` | Full-text search on email bodies, forensic logs, vector index | `netra_opensearch_data` |
 | **Neo4j 5** | `7474` (UI), `7687` (Bolt) | Attack infrastructure graph, campaign cluster relationships | `netra_neo4j_data`, `netra_neo4j_logs` |
-| **MinIO** | `9000` (S3), `9001` (UI) | Object storage for raw EML evidence & extracted attachments | `netra_minio_data` |
-| **MinIO Init** | _Ephemeral_ | Auto-provisions `raw-emails`, `attachments`, `quarantine`, `reports` | None (cli tool) |
+| **SeaweedFS 4.47** | `8333` (S3), `23646` (admin UI) | Object storage for raw EML evidence & extracted attachments. Buckets `raw-emails`, `attachments`, `quarantine`, `reports` are created by the ingestion service at startup | `netra_seaweedfs_data` |
+
+### Why SeaweedFS, not MinIO
+
+MinIO stopped publishing free Docker images in October 2025 and removed `minio/minio`
+and `minio/mc` from Docker Hub in September 2026, so a fresh `docker compose up` could
+no longer pull them. SeaweedFS is Apache-2.0 licensed, runs as one container, and
+supports S3 Object Lock, which a future evidence-retention policy can use to make stored
+emails immutable. The services still use the MinIO *Python SDK*, which is maintained and
+works with any S3-compatible server.
+
+Security defaults, enforced in `docker-compose.yml`:
+
+- SeaweedFS allows anonymous access to everything when no S3 identity is configured, and
+  leaves its admin UI open when no password is set. The container refuses to start
+  unless `S3_ACCESS_KEY`, `S3_SECRET_KEY` and `SEAWEEDFS_ADMIN_PASSWORD` are set.
+- Only the S3 API (credentials required) and the admin UI (password required) are
+  published to the host. SeaweedFS's filer, which serves files over plain HTTP without
+  authentication, stays inside the Docker network, with directory listing disabled.
+- The image is pinned to an exact release, not `latest`.
+
+Migrating existing MinIO data: copy every object across with an S3 client, then verify
+each object's SHA-256 before removing MinIO. The old `netra_minio_data` volume is left
+on disk until you delete it (`docker volume rm netra_minio_data`).
 
 ---
 
@@ -39,7 +61,7 @@ The local development infrastructure stack is provisioned via `docker-compose.ym
 
 ### Network Configuration (`netra-network`)
 - All database and storage containers are attached to an isolated bridge network named `netra-network`.
-- **Service Discovery**: Containers communicate internally using service names as hostnames (e.g., `postgres:5432`, `redis:6379`, `minio:9000`, `neo4j:7687`, `opensearch:9200`).
+- **Service Discovery**: Containers communicate internally using service names as hostnames (e.g., `postgres:5432`, `redis:6379`, `seaweedfs:8333`, `neo4j:7687`, `opensearch:9200`).
 - **Isolation**: Prevents external exposure except for mapped development host ports. Future microservices connect to `netra-network` to seamlessly access all datastores.
 
 ### Persistent Volume Mounts
@@ -48,7 +70,7 @@ Named Docker volumes ensure data is preserved across container restarts, rebuild
 - `netra_redis_data`: Persists Redis snapshots and append-only files (AOF) in `/data`.
 - `netra_opensearch_data`: Persists OpenSearch indices and cluster state in `/usr/share/opensearch/data`.
 - `netra_neo4j_data` & `netra_neo4j_logs`: Persists the Neo4j graph database state and query transaction logs.
-- `netra_minio_data`: Persists raw object blobs (email samples, quarantined malware) in `/data`.
+- `netra_seaweedfs_data`: Persists raw object blobs (email samples, quarantined malware) in `/data`.
 
 ---
 
@@ -339,7 +361,7 @@ about that failure is visible in the metrics.
 
 Netra removes the possibility rather than watching for it. `ml/corpus.py` constructs the
 **real** `EmailParserWorker(connect=False)` — the same class the parser service runs, with
-Redis and MinIO detached — and calls the **same** four Layer 3 engines the analyzer calls:
+Redis and object storage detached — and calls the **same** four Layer 3 engines the analyzer calls:
 
 ```python
 parsed = parser.parse_rfc5322(raw_bytes=raw, email_id=email_id, ...)
@@ -580,7 +602,7 @@ view, stream, account creation and email submission is written to the `audit_eve
 table with the username, role, client IP and time. Admins read it at `GET /api/v1/audit`
 (filters: `username`, `action`, `resource`).
 
-Each submission's record includes the **SHA-256 of the raw email** and its MinIO object
+Each submission's record includes the **SHA-256 of the raw email** and its object-store
 path, so anyone can later verify that the stored evidence is exactly what was submitted.
 The ingestion service queues that record in the same Redis transaction as the email
 itself: no email can enter the pipeline without its submission being recorded.
@@ -637,9 +659,9 @@ docker compose ps
 
 ### 5. Accessing Management UIs
 Once running, you can access the respective management consoles locally:
-- **MinIO Object Console**: [http://localhost:9001](http://localhost:9001)
-  - _Username_: `netra_minio_admin`
-  - _Password_: `netra_minio_secret_2026`
+- **SeaweedFS Admin UI**: [http://localhost:23646](http://localhost:23646), to browse stored evidence
+  - _Username_: `admin`
+  - _Password_: `SEAWEEDFS_ADMIN_PASSWORD` from your `.env`
 - **Neo4j Graph Browser**: [http://localhost:7474](http://localhost:7474)
   - _Username_: `neo4j`
   - _Password_: `netra_secret_graph_2026`

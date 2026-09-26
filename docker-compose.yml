@@ -107,58 +107,44 @@ services:
       retries: 10
 
   # ----------------------------------------------------------------------------
-  # MinIO: S3-Compatible Object Store for Raw EML, Attachments & Evidence
+  # SeaweedFS: S3-Compatible Object Store for Raw EML, Attachments & Evidence
   # ----------------------------------------------------------------------------
-  minio:
-    image: minio/minio:latest
-    container_name: netra-minio
+  # Pinned to an exact release: MinIO's images vanished from Docker Hub, and an
+  # unpinned `latest` is how that broke fresh installs.
+  seaweedfs:
+    image: chrislusf/seaweedfs:4.47
+    container_name: netra-seaweedfs
     restart: unless-stopped
-    command: server /data --console-address ":9001"
     environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-netra_minio_admin}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-netra_minio_secret_2026}
+      - S3_ACCESS_KEY=${S3_ACCESS_KEY:-}
+      - S3_SECRET_KEY=${S3_SECRET_KEY:-}
+      - SEAWEEDFS_ADMIN_PASSWORD=${SEAWEEDFS_ADMIN_PASSWORD:-}
+    # With no identity configured SeaweedFS allows anonymous access to everything,
+    # and with no password its admin UI is open. Refuse to start in either case.
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -eu
+        : "$${S3_ACCESS_KEY:?set S3_ACCESS_KEY in .env}"
+        : "$${S3_SECRET_KEY:?set S3_SECRET_KEY in .env}"
+        : "$${SEAWEEDFS_ADMIN_PASSWORD:?set SEAWEEDFS_ADMIN_PASSWORD in .env}"
+        printf '{"identities":[{"name":"netra","credentials":[{"accessKey":"%s","secretKey":"%s"}],"actions":["Admin","Read","Write","List","Tagging"]}]}' \
+          "$$S3_ACCESS_KEY" "$$S3_SECRET_KEY" > /tmp/s3.json
+        exec /entrypoint.sh mini -dir=/data -s3.config=/tmp/s3.json \
+          -admin.password="$$SEAWEEDFS_ADMIN_PASSWORD" \
+          -filer.disableDirListing -s3.port.iceberg=0 -s3.port.lance=0
     ports:
-      - "9000:9000" # S3 API
-      - "9001:9001" # Web Console
+      - "8333:8333"   # S3 API (credentials required)
+      - "23646:23646" # Admin UI (password required)
     volumes:
-      - minio_data:/data
+      - seaweedfs_data:/data
     networks:
       - netra-network
     healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:9000/minio/health/live || exit 1"]
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:8333/healthz || exit 1"]
       interval: 5s
       timeout: 5s
-      retries: 5
-
-  # ----------------------------------------------------------------------------
-  # MinIO Bucket Auto-Provisioner (Runs once on MinIO startup)
-  # ----------------------------------------------------------------------------
-  minio-init:
-    image: minio/mc:latest
-    container_name: netra-minio-init
-    depends_on:
-      minio:
-        condition: service_healthy
-    networks:
-      - netra-network
-    entrypoint: >
-      /bin/sh -c "
-      echo 'Configuring MinIO client alias...';
-      mc alias set netra_minio http://minio:9000 $${MINIO_ROOT_USER:-netra_minio_admin} $${MINIO_ROOT_PASSWORD:-netra_minio_secret_2026};
-      echo 'Creating core storage buckets...';
-      mc mb --ignore-existing netra_minio/raw-emails;
-      mc mb --ignore-existing netra_minio/attachments;
-      mc mb --ignore-existing netra_minio/quarantine;
-      mc mb --ignore-existing netra_minio/reports;
-      echo 'Securing bucket access policies...';
-      mc anonymous set none netra_minio/raw-emails;
-      mc anonymous set none netra_minio/attachments;
-      mc anonymous set none netra_minio/quarantine;
-      mc anonymous set none netra_minio/reports;
-      echo 'MinIO storage layer ready.';
-      exit 0;
-      "
-    restart: "no"
+      retries: 20
 
   # ----------------------------------------------------------------------------
   # Layer 1: Email Ingestion Service (FastAPI)
@@ -177,19 +163,17 @@ services:
       - PYTHONUNBUFFERED=1
       - REDIS_HOST=redis
       - REDIS_PORT=6379
-      - MINIO_ENDPOINT=minio:9000
-      - MINIO_ROOT_USER=${MINIO_ROOT_USER:-netra_minio_admin}
-      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD:-netra_minio_secret_2026}
-      - MINIO_SECURE=false
+      - S3_ENDPOINT=seaweedfs:8333
+      - S3_ACCESS_KEY=${S3_ACCESS_KEY:-}
+      - S3_SECRET_KEY=${S3_SECRET_KEY:-}
+      - S3_SECURE=false
       # No default: the service refuses to start without a signing secret.
       - NETRA_AUTH_SECRET=${NETRA_AUTH_SECRET:-}
     depends_on:
       redis:
         condition: service_healthy
-      minio:
+      seaweedfs:
         condition: service_healthy
-      minio-init:
-        condition: service_completed_successfully
     networks:
       - netra-network
     healthcheck:
@@ -213,17 +197,15 @@ services:
       - PYTHONUNBUFFERED=1
       - REDIS_HOST=redis
       - REDIS_PORT=6379
-      - MINIO_ENDPOINT=minio:9000
-      - MINIO_ROOT_USER=${MINIO_ROOT_USER:-netra_minio_admin}
-      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD:-netra_minio_secret_2026}
-      - MINIO_SECURE=false
+      - S3_ENDPOINT=seaweedfs:8333
+      - S3_ACCESS_KEY=${S3_ACCESS_KEY:-}
+      - S3_SECRET_KEY=${S3_SECRET_KEY:-}
+      - S3_SECURE=false
     depends_on:
       redis:
         condition: service_healthy
-      minio:
+      seaweedfs:
         condition: service_healthy
-      minio-init:
-        condition: service_completed_successfully
     networks:
       - netra-network
 
@@ -455,5 +437,5 @@ volumes:
     name: netra_neo4j_data
   neo4j_logs:
     name: netra_neo4j_logs
-  minio_data:
-    name: netra_minio_data
+  seaweedfs_data:
+    name: netra_seaweedfs_data

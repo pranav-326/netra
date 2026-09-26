@@ -44,12 +44,12 @@ else
     echo -e "${RED}[FAIL] Neo4j is not responding.${NC}"
 fi
 
-# 5. MinIO
-echo -n "Checking MinIO (Port 9000 / 9001)... "
-if curl -s -f http://localhost:9000/minio/health/live > /dev/null 2>&1; then
-    echo -e "${GREEN}[OK] MinIO Object Store is healthy.${NC}"
+# 5. SeaweedFS
+echo -n "Checking SeaweedFS (Port 8333 S3 / 23646 UI)... "
+if curl -s -f http://localhost:8333/healthz > /dev/null 2>&1; then
+    echo -e "${GREEN}[OK] SeaweedFS Object Store is healthy.${NC}"
 else
-    echo -e "${RED}[FAIL] MinIO is not responding.${NC}"
+    echo -e "${RED}[FAIL] SeaweedFS is not responding.${NC}"
 fi
 
 echo -e "\n${GREEN}Infrastructure health check completed.${NC}"

@@ -55,15 +55,20 @@ class Settings(BaseSettings):
     def neo4j_bolt_url(self) -> str:
         return f"bolt://{self.NEO4J_HOST}:{self.NEO4J_BOLT_PORT}"
 
-    # MinIO / S3 (Layer 8)
-    MINIO_ENDPOINT: str = Field(default="localhost:9000")
-    MINIO_ROOT_USER: str = Field(default="netra_minio_admin")
-    MINIO_ROOT_PASSWORD: str = Field(default="netra_minio_secret_2026")
-    MINIO_SECURE: bool = Field(default=False)
+    # S3-compatible object store for evidence: SeaweedFS (Layer 8). No default
+    # credentials: services refuse to start without them.
+    S3_ENDPOINT: str = Field(default="localhost:8333")
+    S3_ACCESS_KEY: str = Field(default="")
+    S3_SECRET_KEY: str = Field(default="")
+    S3_SECURE: bool = Field(default=False)
     RAW_EMAILS_BUCKET: str = Field(default="raw-emails")
     ATTACHMENTS_BUCKET: str = Field(default="attachments")
     QUARANTINE_BUCKET: str = Field(default="quarantine")
     REPORTS_BUCKET: str = Field(default="reports")
+
+    @property
+    def evidence_buckets(self) -> list:
+        return [self.RAW_EMAILS_BUCKET, self.ATTACHMENTS_BUCKET, self.QUARANTINE_BUCKET, self.REPORTS_BUCKET]
 
     # ------------------------------------------------------------------
     # Layer 5: External Threat Intelligence
