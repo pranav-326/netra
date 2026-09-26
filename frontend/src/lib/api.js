@@ -351,86 +351,42 @@ export async function fetchEmailSubgraph(emailId) {
 }
 
 /**
- * Resolves real-time IP Geolocation, ASN, and ISP data for email ingress IPs.
+ * Looks up the location, ISP and ASN of a relay IP through the third-party service
+ * ipwho.is, from the browser. Returns null when the lookup fails or the address is
+ * private; callers show "not resolved" rather than a placeholder.
  */
 export async function resolveIpGeolocation(ip) {
   if (!ip || typeof ip !== 'string') return null;
   const cleanIp = ip.trim();
 
-  // Handle loopback or private ranges
-  if (
-    cleanIp === '127.0.0.1' ||
-    cleanIp === '0.0.0.0' ||
-    cleanIp.startsWith('10.') ||
-    cleanIp.startsWith('192.168.') ||
-    cleanIp.startsWith('172.16.') ||
-    cleanIp.startsWith('172.17.') ||
-    cleanIp.startsWith('172.18.')
-  ) {
-    return {
-      ip: cleanIp,
-      location: 'Internal Corporate Perimeter',
-      city: 'Private Network',
-      region: 'Intranet',
-      country: 'Internal Subnet',
-      countryCode: 'LAN',
-      flag: '🔒',
-      isp: 'Corporate Gateway',
-      asn: 'Private BGP Transit',
-      lat: 37.7749,
-      lon: -122.4194,
-    };
+  // Private, loopback, link-local, carrier-grade NAT and unspecified addresses have no
+  // public location: return nothing rather than a placeholder pin.
+  if (/^(10\.|127\.|0\.|169\.254\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.)/.test(cleanIp)) {
+    return null;
   }
 
-  // 1. Try ipwho.is (Free HTTPS with SVG flag & ASN)
+  // Only what the lookup service reported; missing fields stay empty, never defaulted.
   try {
     const res = await fetch(`https://ipwho.is/${cleanIp}`, { signal: AbortSignal.timeout(4000) });
-    if (res.ok) {
-      const data = await res.json();
-      if (data.success) {
-        return {
-          ip: cleanIp,
-          location: `${data.city || data.region || 'Unknown City'}, ${data.country || 'Unknown Country'}`,
-          city: data.city || data.region || 'Unknown City',
-          region: data.region || '',
-          country: data.country || 'Unknown Country',
-          countryCode: data.country_code || 'UN',
-          flag: data.flag?.emoji || '🌐',
-          isp: data.connection?.isp || data.connection?.org || 'Internet Service Provider',
-          asn: data.connection?.asn ? `AS${data.connection.asn} ${data.connection.org || ''}`.trim() : 'BGP Transit',
-          lat: data.latitude || 37.7749,
-          lon: data.longitude || -122.4194,
-        };
-      }
-    }
+    if (!res.ok) return null;
+    const data = await res.json();
+    if (!data.success) return null;
+    const hasCoordinates = typeof data.latitude === 'number' && typeof data.longitude === 'number';
+    return {
+      ip: cleanIp,
+      city: data.city || null,
+      region: data.region || null,
+      country: data.country || null,
+      countryCode: data.country_code || null,
+      flag: data.flag?.emoji || null,
+      isp: data.connection?.isp || data.connection?.org || null,
+      asn: data.connection?.asn ? `AS${data.connection.asn} ${data.connection.org || ''}`.trim() : null,
+      lat: hasCoordinates ? data.latitude : null,
+      lon: hasCoordinates ? data.longitude : null,
+      source: 'ipwho.is',
+    };
   } catch (err) {
-    console.warn('ipwho.is lookup failed, trying fallback:', err);
+    console.warn('IP geolocation lookup failed:', err);
+    return null;
   }
-
-  // 2. Fallback to ip-api.com
-  try {
-    const res = await fetch(`http://ip-api.com/json/${cleanIp}`, { signal: AbortSignal.timeout(3500) });
-    if (res.ok) {
-      const data = await res.json();
-      if (data.status === 'success') {
-        return {
-          ip: cleanIp,
-          location: `${data.city}, ${data.country}`,
-          city: data.city,
-          region: data.regionName,
-          country: data.country,
-          countryCode: data.countryCode,
-          flag: '🌐',
-          isp: data.isp || data.org || 'Internet Service Provider',
-          asn: data.as || 'BGP Transit',
-          lat: data.lat,
-          lon: data.lon,
-        };
-      }
-    }
-  } catch (err) {
-    console.warn('ip-api.com fallback failed:', err);
-  }
-
-  return null;
 }

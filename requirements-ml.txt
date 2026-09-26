@@ -6,3 +6,5 @@
 #   python -m ml.train_scorer --features data/features.jsonl
 scikit-learn>=1.5.0
 numpy>=1.26.0
+phonenumbers>=8.13.0
+pytz>=2024.1

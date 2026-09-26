@@ -6,3 +6,5 @@ pydantic>=2.7.0
 redis>=5.0.4
 tldextract>=5.1.2
 aiohttp>=3.9.5
+phonenumbers>=8.13.0
+pytz>=2024.1

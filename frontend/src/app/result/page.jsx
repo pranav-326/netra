@@ -32,6 +32,7 @@ import { SAMPLE_CASE_0891, CASES_MAP } from '@/lib/sampleData';
 import { fetchReportDetails, pollReportDetails, resolveIpGeolocation } from '@/lib/api';
 import { transformBackendReport } from '@/lib/emlParser';
 import ScoreWaterfall from '@/components/ScoreWaterfall';
+import OriginClues from '@/components/OriginClues';
 
 function ResultContent() {
   const router = useRouter();
@@ -105,10 +106,9 @@ function ResultContent() {
     const ipArtifact = caseData.iocArtifacts?.find(i => (i.type || '').toUpperCase() === 'IP');
     let targetIp = ipArtifact?.value;
 
-    // 2. Locate from infrastructure location detail
-    if (!targetIp && caseData.infrastructure?.locationDetail) {
-      const match = caseData.infrastructure.locationDetail.match(/\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b/);
-      if (match) targetIp = match[0];
+    // 2. The relay IP the report recorded
+    if (!targetIp && caseData.infrastructure?.relayIp) {
+      targetIp = caseData.infrastructure.relayIp;
     }
 
     // 3. Locate from first relay hop
@@ -417,43 +417,46 @@ function ResultContent() {
         {/* RIGHT COLUMN: INFRASTRUCTURE MAP & ATTACK GRAPH */}
         {/* ========================================================= */}
         <div className="space-y-6">
-          
-          {/* Card 1: Estimated Infrastructure Location (Interactive Vector Map) */}
+
+          {/* Location evidence from the email itself (not IP) */}
+          <OriginClues origin={caseData?.origin} />
+
+          {/* Card 1: Relay server location. Only looked-up or recorded facts; never a guess. */}
           <div className="rounded-2xl bg-white dark:bg-slate-900 border border-slate-200/80 dark:border-slate-800 shadow-sm p-5 space-y-4">
             <div className="flex items-center justify-between border-b border-slate-100 dark:border-slate-800 pb-3">
               <div className="flex items-center gap-2">
                 <MapPin className="w-4 h-4 text-slate-700 dark:text-slate-300" />
                 <h2 className="text-sm font-bold text-slate-900 dark:text-white">
-                  Estimated Infrastructure Location
+                  Relay Server Location
                 </h2>
               </div>
-              <span className="text-[11px] font-mono font-semibold text-blue-600 dark:text-blue-400">
-                {caseData?.infrastructure?.confidence || '95% Confidence'}
+              <span className="text-[11px] font-mono font-semibold text-slate-500 dark:text-slate-400">
+                {isLoadingGeo ? 'Looking up…' : geoInfo ? `IP lookup · ${geoInfo.source}` : 'Not resolved'}
               </span>
             </div>
 
-            {/* Live Interactive Geo Map & Origin Details */}
             <div className="relative h-56 w-full rounded-xl bg-slate-900 overflow-hidden border border-slate-200 dark:border-slate-800 flex items-center justify-center shadow-inner">
               {geoInfo && typeof geoInfo.lat === 'number' && typeof geoInfo.lon === 'number' ? (
                 <>
                   <iframe
-                    title="Ingress IP Geographic Map"
+                    title="Relay IP location map"
                     className="absolute inset-0 w-full h-full opacity-85 hover:opacity-100 transition filter contrast-125"
                     style={{ border: 0 }}
-                    src={`https://www.openstreetmap.org/export/embed.html?bbox=${(Number(geoInfo.lon) - 0.08).toFixed(4)}%2C${(Number(geoInfo.lat) - 0.05).toFixed(4)}%2C${(Number(geoInfo.lon) + 0.08).toFixed(4)}%2C${(Number(geoInfo.lat) + 0.05).toFixed(4)}&layer=mapnik&marker=${Number(geoInfo.lat).toFixed(4)}%2C${Number(geoInfo.lon).toFixed(4)}`}
+                    src={`https://www.openstreetmap.org/export/embed.html?bbox=${(geoInfo.lon - 0.08).toFixed(4)}%2C${(geoInfo.lat - 0.05).toFixed(4)}%2C${(geoInfo.lon + 0.08).toFixed(4)}%2C${(geoInfo.lat + 0.05).toFixed(4)}&layer=mapnik&marker=${geoInfo.lat.toFixed(4)}%2C${geoInfo.lon.toFixed(4)}`}
                     loading="lazy"
                   />
-                  {/* Floating glassmorphism badge with verified IP details */}
                   <div className="absolute bottom-2 left-2 right-2 p-2.5 rounded-lg bg-slate-950/85 backdrop-blur-md border border-slate-800 text-white flex items-center justify-between shadow-lg pointer-events-none">
                     <div className="flex items-center gap-2">
                       <span className="text-xl leading-none">{geoInfo.flag || '🌐'}</span>
                       <div>
                         <div className="text-xs font-bold font-sans flex items-center gap-1.5">
-                          <span>{geoInfo.city || 'Detected City'}, {geoInfo.country || 'Global Location'}</span>
-                          <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-600/80 font-mono font-normal">{geoInfo.countryCode || 'NET'}</span>
+                          <span>{[geoInfo.city, geoInfo.country].filter(Boolean).join(', ') || 'Place not reported'}</span>
+                          {geoInfo.countryCode && (
+                            <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-600/80 font-mono font-normal">{geoInfo.countryCode}</span>
+                          )}
                         </div>
                         <div className="text-[10px] font-mono text-slate-400">
-                          {Number(geoInfo.lat).toFixed(4)}° N, {Number(geoInfo.lon).toFixed(4)}° E
+                          {Math.abs(geoInfo.lat).toFixed(4)}° {geoInfo.lat >= 0 ? 'N' : 'S'}, {Math.abs(geoInfo.lon).toFixed(4)}° {geoInfo.lon >= 0 ? 'E' : 'W'}
                         </div>
                       </div>
                     </div>
@@ -465,51 +468,39 @@ function ResultContent() {
                   </div>
                 </>
               ) : (
-                /* Clean fallback indicator */
                 <div className="relative w-full h-full flex items-center justify-center bg-slate-950/40">
-                  <svg className="absolute inset-0 w-full h-full opacity-20 pointer-events-none" viewBox="0 0 400 200">
-                    <path d="M 0 100 Q 100 80, 200 110 T 400 90" stroke="#3b82f6" strokeWidth="4" fill="none" opacity="0.6" />
-                    <path d="M 50 0 L 350 200" stroke="#94a3b8" strokeWidth="1.5" strokeDasharray="4" fill="none" />
-                    <circle cx="200" cy="100" r="60" stroke="#cbd5e1" strokeWidth="1" fill="none" />
-                  </svg>
-                  <div className="relative z-10 text-center space-y-1">
-                    <div className="flex items-center justify-center">
-                      <span className="relative flex h-4 w-4 items-center justify-center">
-                        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75"></span>
-                        <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-blue-600"></span>
-                      </span>
-                    </div>
+                  <div className="relative z-10 text-center space-y-1 px-4">
                     <div className="text-lg font-bold tracking-tight text-white">
-                      {geoInfo?.location || caseData?.infrastructure?.location || 'Detected Ingress Node'}
+                      {geoInfo
+                        ? [geoInfo.city, geoInfo.country].filter(Boolean).join(', ') || 'Place not reported'
+                        : caseData?.infrastructure?.location || (isLoadingGeo ? 'Looking up relay IP…' : 'Location not resolved')}
                     </div>
-                    <div className="text-[11px] font-mono text-blue-400 font-semibold">
-                      ● {geoInfo?.ip || caseData?.infrastructure?.locationDetail || 'Transport Chain Relay'}
+                    <div className="text-[11px] font-mono text-slate-400">
+                      {geoInfo?.ip || caseData?.infrastructure?.relayIp || 'No public relay IP in this report'}
                     </div>
                   </div>
                 </div>
               )}
             </div>
 
-            {/* Provider & Latency details */}
             <div className="grid grid-cols-2 gap-3 pt-1 text-xs font-mono">
               <div>
                 <div className="text-[10px] text-slate-400 uppercase font-semibold">NETWORK PROVIDER / ASN</div>
-                <div className="text-slate-800 dark:text-slate-200 font-bold mt-0.5 truncate" title={geoInfo?.asn || caseData?.infrastructure?.networkProvider || 'Autonomous Transit'}>
-                  {geoInfo?.asn || caseData?.infrastructure?.networkProvider || 'Autonomous Transit'}
+                <div className="text-slate-800 dark:text-slate-200 font-bold mt-0.5 truncate" title={geoInfo?.asn || caseData?.infrastructure?.networkProvider || 'Unknown'}>
+                  {geoInfo?.asn || caseData?.infrastructure?.networkProvider || 'Unknown'}
                 </div>
               </div>
               <div>
                 <div className="text-[10px] text-slate-400 uppercase font-semibold">ISP & CARRIER</div>
-                <div className="text-slate-800 dark:text-slate-200 font-bold mt-0.5 truncate" title={geoInfo?.isp || 'BGP Transit'}>
-                  {geoInfo?.isp || 'BGP Transit'}
+                <div className="text-slate-800 dark:text-slate-200 font-bold mt-0.5 truncate" title={geoInfo?.isp || 'Unknown'}>
+                  {geoInfo?.isp || 'Unknown'}
                 </div>
               </div>
             </div>
 
-            {/* Disclaimer */}
             <div className="pt-2 text-[11px] text-slate-400 flex items-start gap-1.5 border-t border-slate-100 dark:border-slate-800">
               <Info className="w-3.5 h-3.5 shrink-0 mt-0.5 text-slate-400" />
-              <span>{caseData?.infrastructure?.disclaimer || 'Intermediate relay infrastructure, extracted from RFC 5322 Received headers.'}</span>
+              <span>{caseData?.infrastructure?.disclaimer || 'Location of a mail relay server from the Received headers: it locates infrastructure, not the sender.'}</span>
             </div>
           </div>
 

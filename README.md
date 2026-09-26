@@ -482,6 +482,40 @@ reported as *unresolved*, never as clean. Successful resolutions are cached for 
 network failures are not cached, so the next email retries. Offline corpus work
 (`ml/corpus.py`) does not resolve shorteners.
 
+## Origin analysis: location beyond IP
+
+IP addresses in the relay chain mostly locate mail servers, not people. The origin engine
+(`services/analyzer/src/engines/origin_engine.py`) extracts location evidence carried by
+the email itself and states what each clue actually locates:
+
+| Clue | Locates | Strength | Notes |
+| :--- | :--- | :--- | :--- |
+| IBAN | Payment destination (bank account) | strong | Validated against each country's IBAN length and the mod-97 checksum; stored masked (`DE89 •••• 3000`) |
+| SWIFT/BIC | Payment destination (bank) | strong | Only after the words "SWIFT" or "BIC", so ordinary capitalised words are not read as bank codes |
+| Phone number | Where the number is registered | medium | Validated offline with Google's `phonenumbers`; toll-free North American numbers carry no location; VoIP numbers are flagged |
+| `Date` header offset | The sender's clock | medium or weak | Checked against real timezone rules for the email's date, daylight saving included; `+0000` is ignored as a server default |
+| Writing language | Language region | weak | Script detection (Japanese, Cyrillic, Arabic…) and common-word counts for Latin-script languages; English gives no clue |
+| Sender's country domain | Domain registry | weak | Generic two-letter domains (`.io`, `.co`, `.ai`…) are ignored |
+
+**Two answers, not one.** Bank details locate where the money goes, which is often a
+money-mule account rather than the sender. So the assessment reports the **probable
+sender country** (from phone, timezone, language and domain) separately from the
+**payment destination**, and says when they differ:
+
+> *Sender: probably India (medium confidence), from 2 clue(s). Payment goes to Germany
+> (bank details): often a money-mule account rather than the sender's own. The money
+> leaves the sender's apparent country, a common money-mule pattern.*
+
+**Confidence.** High needs three independent kinds of clue agreeing with no serious
+disagreement; medium needs two; a single clue stays low. When the clues fit several
+countries equally (a UTC+1 clock alone fits dozens), no country is named. Clues that point
+elsewhere are listed, not hidden.
+
+**Limits.** Every clue can be forged by a careful attacker. On 884 real phishing emails
+from 2024–2025, a sender country was named for about a quarter of them, mostly at low or
+medium confidence: most phishing carries only a timezone. Origin analysis adds no risk
+points; where an email comes from is not evidence that it is malicious.
+
 ## Campaign Correlation Graph
 
 The correlation service (stage 6) writes an attack-infrastructure graph into Neo4j:

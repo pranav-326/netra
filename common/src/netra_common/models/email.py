@@ -134,12 +134,45 @@ class AttachmentAnalysisResult(BaseModel):
     html_attachments: List[str] = Field(default_factory=list, description="Attached HTML/SVG files, a common vector for fake login pages")
 
 
+class LocationClue(BaseModel):
+    """One piece of evidence about where an email, or the money it asks for, comes from."""
+    kind: str = Field(..., description="iban, swift, phone, timezone, language, sender_domain")
+    measures: str = Field(..., description="What the clue locates, e.g. 'payment destination', 'sender's clock'")
+    value: str = Field(..., description="The observation, masked where it is financial data")
+    countries: List[str] = Field(default_factory=list, description="Candidate ISO 3166 alpha-2 codes; empty = no location")
+    region: Optional[str] = Field(None, description="Human-readable place, e.g. 'Florida' or 'India, Sri Lanka'")
+    strength: str = Field(..., description="strong, medium or weak")
+    note: Optional[str] = Field(None, description="Caveat, e.g. 'toll-free: carries no location'")
+
+
+class OriginAssessment(BaseModel):
+    """The clues combined into a probable sender country, with an honest confidence.
+
+    Bank details are kept apart: they locate where the money goes, which is often a
+    money-mule account in a different country from the sender.
+    """
+    country: Optional[str] = Field(None, description="ISO alpha-2 of the sender's most supported country")
+    country_name: Optional[str] = None
+    confidence: str = Field(default="undetermined", description="high, medium, low or undetermined")
+    payment_countries: List[str] = Field(default_factory=list, description="Countries the requested payment goes to")
+    summary: str = Field(default="No location clues found in this email.")
+    supporting: List[str] = Field(default_factory=list)
+    conflicting: List[str] = Field(default_factory=list)
+
+
+class OriginAnalysisResult(BaseModel):
+    """Location clues other than IP addresses (Layer 3). Contributes no risk points."""
+    clues: List[LocationClue] = Field(default_factory=list)
+    assessment: OriginAssessment = Field(default_factory=OriginAssessment)
+
+
 class AnalysisResults(BaseModel):
     """Consolidated container aggregating all Layer 3 security engine outputs."""
     header_analysis: HeaderAnalysisResult = Field(default_factory=HeaderAnalysisResult)
     url_analysis: UrlAnalysisResult = Field(default_factory=UrlAnalysisResult)
     content_analysis: ContentAnalysisResult = Field(default_factory=ContentAnalysisResult)
     attachment_analysis: AttachmentAnalysisResult = Field(default_factory=AttachmentAnalysisResult)
+    origin_analysis: OriginAnalysisResult = Field(default_factory=OriginAnalysisResult)
 
 
 class AnalyzedEmail(BaseModel):

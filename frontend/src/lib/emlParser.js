@@ -276,6 +276,8 @@ export function transformBackendReport(backendData) {
     // scorer is the only source of these — the UI renders them, it does not derive them.
     ruleContributions: assessment.rule_contributions || [],
     scoreBeforeClamp: assessment.score_before_clamp ?? riskScore,
+    // Location clues other than IP, with the backend's combined assessment.
+    origin: analysis.origin_analysis || null,
     backendEmailId: emailId,
     campaignId: correlation.campaign_id || null,
     campaignName: correlation.campaign_name || null,
@@ -320,21 +322,11 @@ export function transformBackendReport(backendData) {
 
     iocArtifacts,
 
+    // Only what the report actually contains: the relay IP. Its location comes from a
+    // lookup on the result page, or is shown as not resolved; nothing is guessed here.
     infrastructure: {
-      location: (rawIocs.find(i => (i.type || '').toLowerCase() === 'ip')?.value?.startsWith('167.') ? 'San Jose, CA (US)' :
-                rawIocs.find(i => (i.type || '').toLowerCase() === 'ip')?.value?.startsWith('185.') ? 'Bucharest, RO' :
-                rawIocs.find(i => (i.type || '').toLowerCase() === 'ip')?.value?.startsWith('45.') ? 'Amsterdam, NL' :
-                rawIocs.find(i => (i.type || '').toLowerCase() === 'ip')?.value?.startsWith('142.') ? 'Mountain View, CA (US)' :
-                rawIocs.find(i => (i.type || '').toLowerCase() === 'ip')?.value ? `Relay (${rawIocs.find(i => (i.type || '').toLowerCase() === 'ip')?.value})` :
-                `Ingress Transit (${senderDomain})`),
-      country: rawIocs.find(i => (i.type || '').toLowerCase() === 'ip')?.value?.startsWith('185.') ? 'RO' :
-               rawIocs.find(i => (i.type || '').toLowerCase() === 'ip')?.value?.startsWith('45.') ? 'NL' : 'US',
-      locationDetail: `Security Ingress Node (${rawIocs.find(i => (i.type || '').toLowerCase() === 'ip')?.value || senderDomain})`,
-      confidence: '95% Confidence',
-      networkProvider: `Autonomous System Transit (${senderDomain})`,
-      roundtripLatency: '18ms',
-      disclaimer: 'Intermediate relay infrastructure, extracted from RFC 5322 Received headers.',
-      coordinates: { lat: 38.9072, lng: -77.0369 }
+      relayIp: rawIocs.find(i => (i.type || '').toLowerCase() === 'ip')?.value || null,
+      disclaimer: 'Location of a mail relay server from the Received headers: it locates infrastructure, not the sender.',
     },
 
     correlationGraph: {

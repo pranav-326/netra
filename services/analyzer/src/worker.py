@@ -25,6 +25,7 @@ from src.engines import (
     analyze_urls,
     analyze_content,
     analyze_attachments,
+    analyze_origin,
 )
 
 logging.basicConfig(
@@ -76,12 +77,22 @@ class EmailAnalyzerWorker:
         # 4. Attachment Security Analysis
         attachment_result = analyze_attachments(parsed_email.attachments)
 
+        # 5. Origin clues other than IP (location evidence; adds no risk points)
+        origin_result = analyze_origin(
+            subject=parsed_email.headers.subject,
+            body_plain=parsed_email.body_plain,
+            body_html=parsed_email.body_html,
+            date_header=parsed_email.headers.date,
+            from_header=parsed_email.headers.from_address,
+        )
+
         # Combine into unified AnalysisResults
         analysis_results = AnalysisResults(
             header_analysis=header_result,
             url_analysis=url_result,
             content_analysis=content_result,
             attachment_analysis=attachment_result,
+            origin_analysis=origin_result,
         )
 
         return AnalyzedEmail(
